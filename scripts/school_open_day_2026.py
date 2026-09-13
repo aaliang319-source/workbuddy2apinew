@@ -1,152 +1,37 @@
 #!/usr/bin/env python3
-"""school_open_day_2026 —— WorkBuddy/CodeBuddy 微信小程序「开学季活动」任务中心
-只读盘点 + 事件上报自动化脚本（默认只读，--run 才发写请求）。
+"""school_open_day_2026 —— WorkBuddy/CodeBuddy 小程序「开学季活动」任务自动化脚本。
 
-本脚本打通了小程序开学季任务中心 5 个任务中的 4 个非人工任务（2026-09-13 实测）。
+用途：盘点/点亮/领奖/抽奖——读取任务中心与抽奖余额、上报非人工任务的完成
+判据、领取奖励、清空幸运大转盘抽奖次数。默认只读，--run / --lottery-only
+配合 --yes 才发写请求。
 
-============================================================
-实测打通的任务与上报链路（2026-09-13，多账号实测验证）
-============================================================
-任务中心的完成判据分三类：
+用法示例：
+  python3 school_open_day_2026.py --list                  # 只读盘点全部账号
+  python3 school_open_day_2026.py --list <uid8> [...更多uid]  # 盘点指定账号
+  python3 school_open_day_2026.py --run --yes             # 点亮并领取任务
+  python3 school_open_day_2026.py --lottery-only --yes    # 只抽奖（清空抽奖次数）
+  账号参数为 auths/workbuddy-<uid8>.json 的 uid 前缀，可多个；缺省或 ALL 即全部。
 
-【A 类：school 活动专属 HTTP 端点】（share_invite，纯 HTTP 诚实点亮）
-  - POST /portal/activity/school/tasks/share-complete   body {channel:"wechat"}
-    -> share_invite 0/1 -> completed 1/1（H5 bundle events/school-season-*.js 里
-       zs=(e="wechat")=>ge("/tasks/share-complete",{channel:e})）
-  - 任务需先 Pending 状态激活：POST /tasks/{code}/viewed（= H5「接任务」动作，
-    pending -> in_progress，H5 bundle Ht() 里 pending 先调 Ys=viewed 再跳转）
-  - 完成后领奖：POST /tasks/{code}/claim （completed -> claimed，发抽奖机会）
-  实测：2026-09-13 双账号 share_invite 均 claimed 1/1，
-        claim 返回 chance_granted:1。
+参数：
+  accounts        uid 前缀（可多个）或 ALL；--token 时可不传
+  --list          只读盘点（默认行为）
+  --run           执行点亮/领取动作（需 --yes 放行写）
+  --lottery-only  只抽奖不做任务（任务已全领时的日常补抽）
+  --yes           放行写操作（配合 --run / --lottery-only）
+  --token         显式覆盖 token（不同源凭证逃生门），可用 --uid 指定日志 uid
+  --gap           写动作间隔秒数（默认 1.5，最小 1.0）
 
-【B 类：/v2/report 事件 + activityId 限定】（chat_3_times / desktop_chat_1_time）
-  - 关键字段：事件必须带 activityId:"school_open_day_2026"（H5 bundle
-    activity_code=school_open_day_2026；不带则服务端不关联 school 任务）
-  - chat_3_times（与 AI 对话 3 次）：POST /v2/report 发一条 chat_request_send
-    事件，shape 必须是小程序域（source=mini_program / ideName=wx_app_cloud /
-    ideType=WorkBuddy_MP / extName=workbuddy-mp / extVersion=SaaS / mode=chat）
-    + activityId + userId（=账号 uid），一次事件 = 一次对话，逐条 +1。
-    实测：逐条上报 0->1->2->3 与批量 0->3 两种节奏均点亮 completed。
-  - desktop_chat_1_time（桌面端对话）：POST /v2/report 发【桌面指纹 6 连事件链】
-    （agent_task_created->chat_message_send->chat_request_send->chat_message_response
-    ->chat_message_status->chat_request_response，照抄 fork workbuddy2api-panel
-    desktop.go 的 DesktopChatSequence）+ 桌面指纹（ideName=WorkBuddy /
-    extName=workbuddy-desktop / os=win32 / machineId 稳定派生）+ activityId
-    + userId，发往 copilot 域 /v2/report。一次 6 连 = 一次桌面对话。
-    实测：双账号 0->1 均点亮 completed。
-  - 桌面指纹差异说明：与 chat_3_times 的 mini 形状相比，desktop 用
-    ideName=WorkBuddy + extName=workbuddy-desktop + os=win32 + arch=x64 +
-    osVersion=10.x + UA="WorkBuddy/5.5.6 CLI/2.137.1"，且发往 copilot
-    tencent.com 域（发向 codebuddy.cn 域不点亮，2026-09-13 实测）。
-    该指纹同时点亮 growth 域 RichMeow_Chat（M14 fork 吸收）。
-
-【C 类：/v2/report 的 expert_actual_use 事件 + BackToSchool 分类专家】（expert_use）
-  - expert_use（召唤开学季专家并对话，每日 1 次）：POST /v2/report 发一条
-    expert_actual_use 事件，id 必须用【BackToSchool 分类】下的 real 专家
-    （类别可用 /v2/operation-platform/market/expert/list 以 categories=["16-BackToSchool"]
-    动态拉取），加 conversationId（无需真实会话，服务端不校验真实性）、
-    activityId=school_open_day_2026、userId。
-    实测 2026-09-13：五个账号
-    全部 completed 1/1（含 ex_jB0dyFIQJEWa 论小舟 与 ex_lQjkerakvIex 英语
-    学习教练两个不同 BackToSchool 专家）。
-  - 【上轮失败的根因】上一轮踩坑用 ex_u62qHKzKqLtC（公益专家，不在
-    BackToSchool 分类）——expert_actual_use 全形状照发却恒 0/1。本轮对照
-    实验（2026-09-13）：同一事件形状、同 fake conversationId，仅把 expert id
-    换成 BackToSchool 分类的专家即点亮，换回公益专家又不亮。判定在
-    「expert id 是否属于 BackToSchool 分类」，与真实会话/多事件链无关。
-
-【幸运大转盘抽奖】（2026-09-13 实测打通，双账号抽空）
-  - 入口在活动主页面（H5 webview），同 school 域：
-      GET  {endpoint}/portal/activity/school/config       -> data.chance.balance（只读余额）
-      POST {endpoint}/portal/activity/school/wheel/draw   body={draw_uuid}（抽一次转盘）
-  - 余额在 /config 返回：【chance】{balance, total_earned, voucher_won, lottery_limit}；
-    balance 即抽奖次数（claim 每次发 chance_granted，累积不清零，活动结束作废）。
-  - draw 返回 data={prize_code, credit_amount, chance_balance}；prize_code 见
-    LOTTERY_PRIZE_LABELS（school_credit_6/66 积分、school_voucher_* 实物券）。
-    积分命中直接 +credit_amount Credit，实物券进「我的券码」。
-  - 幂等/边界：draw_uuid 每轮一次性（H5 crypto.randomUUID()）；余额 0 再抽 →
-    HTTP 409 code=40900 "no chance"（安全，脚本借此优雅停）。
-    实测 2026-09-13：多账号 3->0（+6 积分 ×3）、4->0（+6 ×3、KFC 冰券 ×1）。
-  - 约束：无每日抽奖上限（FAQ 明确「次数可累积使用」）；lottery_limit 是每日
-    实物券发放上限（chance.lottery_limit=1），非抽奖次数限制。
-
-【未打通】
-  - task_student_verify（学生认证）：人工环节（微信学生认证/验证码/录取通知书
-    人工审核），--run 一律跳过。
-
-============================================================
-逆向依据（解包 ~/analysis/wxapp/wx907c65e5e107ddcf_unpacked/ +
-      H5 bundle https://download.codebuddy.cn/web/website/<hash>/assets/
-      events/school-season-CYeXjFHI.js）
-============================================================
-  1) 请求封装与鉴权头 —— app-service-1.js 模块 34049（export request=w）：
-       token 从本地存储读（模块 78982：TOKEN="codebuddy_token"）后
-       `D.Authorization="Bearer ".concat(N)`；仅企业账号再带 X-Enterprise-Id/
-       X-Tenant-Id。无 X-User-Id（但 /v2/report 需 X-User-Id 头与 body userId）。
-  2) 端点 —— 模块 79623 cloudAgentEndpoint="https://www.codebuddy.cn"：
-       任务中心    GET/POST {endpoint}/portal/activity/school/tasks
-                 POST {endpoint}/portal/activity/school/tasks/{code}/viewed（激活）
-                 POST {endpoint}/portal/activity/school/tasks/{code}/claim（领奖）
-                 POST {endpoint}/portal/activity/school/tasks/share-complete（分享完成）
-       幸运大转盘  GET  /portal/activity/school/config          （盘面+余额 chance.balance）
-                 POST /portal/activity/school/wheel/draw        body {draw_uuid}（抽一次）
-       学生认证    POST /portal/activity/school/student-verify  body {wx_studentcheck_code}
-       开学季福利  GET/POST /portal/activity/freshman/{profile|claim}
-       教师福利    GET/POST /portal/activity/teacher/{profile|claim}
-  3) 事件上报通道 POST /v2/report（模块 35192 z()，body=[事件对象]）：
-       - 小程序公共字段（模块 22015 wQ/Ao + 25439）：
-         {eventCode,timestamp,reportDelay,ideType:"WorkBuddy_MP",ideVersion,
-          extName:"workbuddy-mp",extVersion:"SaaS",machineId,os,osVersion,arch,
-          timezone,...,userId,userNickname}
-       - chat_request_send 形状（模块 86692 d()）：source=mini_program，
-         ideName=wx_app_cloud, mode, conversationId, requestId, inputLength,
-         mentionContexts, mentionContextCount, command, traceId。
-       - desktop 桌面指纹（fork desktop.go）：ideName=WorkBuddy/extName=
-         workbuddy-desktop/os=win32/arch=x64/osVersion/machineId 稳定派生。
-       - activityId 关联：chat_request_send 支持 activityId 字段（模块 86692
-         对有会话活动标记的会话附加 activityId）；school 活动 code=
-         school_open_day_2026（H5 bundle activity_code 常量）。
-  4) 任务中心 H5（school-season bundle）业务逻辑：kind 映射
-       Ns={task_student_verify:"student",desktop_chat_1_time:"desktop",
-           expert_use:"expert",chat_3_times:"chat",share_invite:"share"}；
-       无 chat/expert/desktop 完成专用端点（仅 share-complete），这三个任务
-       完成判据依赖真实客户端行为上报。
-  5) expert 事件源（小程序模块 62501，服务端计数判据侧）：
-       expert_summoned / expert_actual_use / expert_summon_click 三个事件，
-       均走 {cloudAgent}/v2/report。expert_actual_use 所需的 id 必须是
-       BackToSchool 分类专家 id（分类专家列表 API 见脚本 fetch_school_expert）。
-  6) 会话创建差异（本轮实验揭示）：/v2/as/conversations/ 的 agentId 必须是
-       内部合法 agent（普通用户不可伪造），但 expert 对象参数可创建会话——
-       对判据不是必需。判据只在事件侧，conversationId 无需真实（实测 fake
-       即可，服务端仅作关联锚点不校验）。
-  7) 幸运大转盘（H5 bundle school-season-CYeXjFHI.js，本轮补充逆向）：
-       - 模块常量 kt="/portal/activity/school"；
-       - Ds=async()=>Ee("/config")  -> 校验 start_at/end_at/Array(prizes)/chance，
-         chance.balance 即抽奖余额（前端主屏 Vn chances 直接消费）；
-       - Os=e=>ge("/wheel/draw",{draw_uuid:e})  -> 抽一次转盘；
-       - draw_uuid 由 Et()=crypto.randomUUID() 生成、每轮抽后 `$e.current=Et()` 弃旧换新
-         （一次性，抽完当轮即作废）；
-       - 结果 data={prize_code, credit_amount, chance_balance}；prize_code 映射
-         Bs={school_voucher_kfc_ok/school_voucher_luckin/school_credit_6/
-             school_voucher_kfc_ice/school_credit_66/school_voucher_kugou}；
-       - 错误码 map We：40900="暂无抽奖次数，完成任务后再来试试吧。"
-         （= 余额 0 再抽服务端 HTTP 409 code=40900 实测一致）、
-         40902="抽奖请求已失效，请重新抽奖。"（draw_uuid 过期/重复）。
-       - FAQ accumulate：「抽奖次数可以累积吗？可以。活动期间内获得的抽奖次数
-         可累积使用，活动结束后未使用的抽奖次数将自动作废。」-> 无每日抽奖上限。
-       - lottery_limit 为每日实物券发放上限（voucherLimit 传给任务卡，非抽奖次数限制）。
-
-风险提示
+风险提示：
   - 活动接口/任务集为服务端下发，随时可能变更；脚本按字段寻址，未知 task_code
-    保守跳过。
-  - share-complete/claim/viewed/event 上报均属写操作，可能触发频控/风控；写动作
-    默认间隔 ≥1s，实测间隔 2s 无异常。
-  - claim 会给账号加抽奖机会（chance_balance），属于真实收益，勿频繁重复。
-  - wheel/draw 也是写操作（消费抽奖次数 + 可能中积分/券），有真实收益；每次
-    间隔 ≥1s，balance 为 0 即停，不过度抽。
-  - draw_uuid 每轮一次性（随机 UUID），抽后即弃；服务端字段寻址，未知 prize_code
-    如实显示原码不编造内容。
-  - student-verify 需人工验证码产物（wx_studentcheck_code），脚本不碰、不伪造。
+    保守跳过，不保证一定点亮成功。
+  - 完成判据上报 / viewed / claim / wheel/draw 均属写操作，可能触发频控/风控，
+    写动作间隔默认 ≥1s。
+  - claim 会给账号加抽奖机会、draw 会真实产生积分/实物券收益，勿频繁重复；
+    余额为 0 或服务端异常即停，不过度抽。
+  - student-verify（学生认证）为人工环节，脚本不碰、不伪造。
+
+依赖：复用 scripts/task_common.py 的 load_auth / AUTHS 常量；
+账号凭证位于 auths/ 目录下 workbuddy-<uid8>.json。
 """
 import sys, os, json, time, hashlib, argparse, glob, uuid, urllib.request, urllib.error
 
@@ -154,7 +39,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import task_common as tc  # 仅复用 load_auth / AUTHS 常量，不复用其 _headers（头不同源）
 
 # --------------------------------------------------------------------------
-# 常量（逆向：模块 79623 cloudAgentEndpoint + 模块 34049 请求封装 + H5 bundle）
+# 端点常量（接口地址）
 # --------------------------------------------------------------------------
 CLOUD_AGENT = "https://www.codebuddy.cn"          # getCloudAgentEndpoint()
 COPILOT     = "https://copilot.tencent.com"       # growth/chat 域（desktop 上报用）
@@ -162,38 +47,36 @@ SCHOOL      = CLOUD_AGENT + "/portal/activity/school"
 FRESHMAN    = CLOUD_AGENT + "/portal/activity/freshman"
 TEACHER     = CLOUD_AGENT + "/portal/activity/teacher"
 
-# school 开学季活动 code（H5 bundle activity_code=school_open_day_2026）
+# school 开学季活动 code（事件 activityId 字段值）
 ACTIVITY_ID = "school_open_day_2026"
 
-# 小程序 UA 由微信原生注入；桌面 UA 来自 fork desktop.go（DesktopChatSequence 用）
+# 小程序由微信注入 UA；桌面上报用桌面 UA
 MP_UA = ("Mozilla/5.0 (Linux; Android 14; MicroMessenger/8.0.49 WeChat/0.8.0 "
          "MiniProgramEnv/android; wkbrowser xweb)")
 DESKTOP_UA = "WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1"
 
 # 任务分类表（task_code -> 处理方式）。mode 语义：
 #   manual  人工环节（学生认证/验证码/审核），--run 一律跳过
-#   share   school 专属 HTTP 端点 share-complete 点亮（实测打通）
-#   report  /v2/report 事件上报点亮（实测打通：chat_3_times 用 mini chat 形状，
-#            desktop_chat_1_time 用桌面指纹 6 连，expert_use 用 BackToSchool
-#            专家 expert_actual_use）
+#   share   share-complete HTTP 端点点亮
+#   report  /v2/report 事件上报点亮（mini chat / 桌面指纹 6 连 / 专家事件）
 # 未在表内（服务端新增任务）保守按 unknown 跳过。
 KNOWN_TASKS = {
     "task_student_verify": {"mode": "manual",  "note": "微信学生认证（人工，不碰）"},
-    "share_invite":        {"mode": "share",   "note": "分享活动给好友；share-complete 点亮（已实测）"},
-    "chat_3_times":        {"mode": "report",  "note": "与 AI 对话 3 次；mini chat_request_send+activityId 点亮（已实测）",
+    "share_invite":        {"mode": "share",   "note": "分享活动给好友；share-complete 点亮"},
+    "chat_3_times":        {"mode": "report",  "note": "与 AI 对话 3 次；mini chat_request_send+activityId 点亮",
                             "report_kind": "mini_chat"},
-    "desktop_chat_1_time": {"mode": "report",  "note": "桌面端对话 1 次；桌面指纹 6 连+activityId 点亮（已实测）",
+    "desktop_chat_1_time": {"mode": "report",  "note": "桌面端对话 1 次；桌面指纹 6 连+activityId 点亮",
                             "report_kind": "desktop_seq"},
-    "expert_use":          {"mode": "report",  "note": "召唤开学季专家并对话；BackToSchool 分类专家 + expert_actual_use 点亮（已实测）",
+    "expert_use":          {"mode": "report",  "note": "召唤开学季专家并对话；BackToSchool 分类专家 + expert_actual_use 点亮",
                             "report_kind": "expert"},
 }
 
-# 活动任务中心成功 code（模块 34049：code===0 成功）
+# 活动接口成功判据：返回 code===0 视为成功
 OK_CODES = (0,)
 
-# 抽奖转盘奖品（逆向：H5 bundle modules 从 /config prizes 返回，prize_code 映射 label）
-# bundle 内 Bs/ys 映射：school_credit_6=6积分 / school_credit_66=66积分，
-# school_voucher_* 为实物券（瑞幸/KFC/酷狗），credit_amount 为积分增量。
+# 抽奖转盘奖品映射（/config prizes 返回的 prize_code -> 标签）：
+# school_credit_6=6积分 / school_credit_66=66积分，school_voucher_* 为实物券
+# （瑞幸/KFC/酷狗），credit_amount 为积分增量。
 LOTTERY_PRIZE_LABELS = {
     "school_credit_6":      {"label": "6积分",   "type": "credit"},
     "school_credit_66":     {"label": "66积分",  "type": "credit"},
@@ -324,7 +207,7 @@ def fetch_profile(token, which):
 
 
 def list_account(auth, stats):
-    """只读盘点单个账号 + 实测打通状态标注。"""
+    """只读盘点单个账号。"""
     uid8 = (auth.get("uid") or "")[:8] or "?"
     print(f"== {uid8} ({auth.get('nick') or '-'}) ==")
     try:
@@ -371,11 +254,10 @@ def list_account(auth, stats):
 
 
 # --------------------------------------------------------------------------
-# school 专属 HTTP 端点（实测打通动作）
+# school 专属 HTTP 端点（点亮动作）
 # --------------------------------------------------------------------------
 def post_viewed(token, code):
-    """POST /tasks/{code}/viewed —— H5「接任务」动作（pending -> in_progress）。
-    实测 2026-09-13：能激活 chat_3_times/desktop_chat_1_time/expert_use/share_invite。"""
+    """POST /tasks/{code}/viewed —— 「接任务」动作（pending -> in_progress）。"""
     st, r = request_retry(token, "POST", f"{SCHOOL}/tasks/{code}/viewed")
     if st != 200 or (isinstance(r, dict) and r.get("code") not in OK_CODES):
         msg, is_auth = _interpret_failure(st, r)
@@ -384,8 +266,7 @@ def post_viewed(token, code):
 
 
 def post_share_complete(token):
-    """POST /tasks/share-complete {channel:"wechat"} —— share_invite 完成判据。
-    实测 2026-09-13：分享 0/1 -> completed 1/1。"""
+    """POST /tasks/share-complete {channel:"wechat"} —— share_invite 完成判据。"""
     st, r = request_retry(token, "POST", f"{SCHOOL}/tasks/share-complete",
                           {"channel": "wechat"})
     if st != 200 or (isinstance(r, dict) and r.get("code") not in OK_CODES):
@@ -395,8 +276,7 @@ def post_share_complete(token):
 
 
 def post_claim(token, code):
-    """POST /tasks/{code}/claim —— 领奖（completed -> claimed）。
-    实测 2026-09-13：发抽奖机会 chance_granted:1；重复 claim 返回 40901。"""
+    """POST /tasks/{code}/claim —— 领奖（completed -> claimed），发抽奖机会。"""
     st, r = request_retry(token, "POST", f"{SCHOOL}/tasks/{code}/claim")
     if st != 200 or (isinstance(r, dict) and r.get("code") not in OK_CODES):
         msg, is_auth = _interpret_failure(st, r)
@@ -405,18 +285,15 @@ def post_claim(token, code):
 
 
 # --------------------------------------------------------------------------
-# 抽奖（幸运大转盘）—— 逆向：H5 bundle events/school-season-*.js
+# 抽奖（幸运大转盘）
 # --------------------------------------------------------------------------
 def fetch_lottery_config(token):
     """GET /portal/activity/school/config —— 抽奖盘面 + 余额（只读）。
 
     返回 (config, chance)：
       config = data（含 start_at/end_at/in_period/prizes[]）
-      chance = data.chance = {balance, total_earned, voucher_won, lottery_limit}
-    逆向依据（H5 bundle school-season-CYeXjFHI.js）：
-      模块常量 kt="/portal/activity/school"，Ds=async()=>Ee("/config")
-      取 e.start_at/end_at/e.prizes/e.chance，chance.balance 即抽奖余额；
-      页面主屏 Vn {chances:f} 直接消费该 balance。"""
+      chance = data.chance = {balance, total_earned, voucher_won, lottery_limit}；
+      chance.balance 即抽奖次数余额。"""
     st, r = request_retry(token, "GET", SCHOOL + "/config")
     if st != 200 or (isinstance(r, dict) and r.get("code") not in OK_CODES):
         msg, is_auth = _interpret_failure(st, r)
@@ -428,11 +305,8 @@ def fetch_lottery_config(token):
 def post_lottery_draw(token, draw_uuid):
     """POST /portal/activity/school/wheel/draw {draw_uuid} —— 抽一次转盘。
 
-    逆向依据（H5 bundle）：
-      kt="/portal/activity/school"，Os=e=>ge("/wheel/draw",{draw_uuid:e})；
-      draw_uuid 每轮由 crypto.randomUUID()（Et()）生成、抽后即弃（一次性）。
+    draw_uuid 每轮一次性（随机 UUID），抽后即弃。
     返回 (st, resp)；resp.data={prize_code, credit_amount, chance_balance}。
-    实测 2026-09-13（双账号）：余额逐次 -1，回读一致。
     边界：余额 0 时返回 HTTP 409 code=40900 "no chance"（不再扣，安全）。
     """
     body = {"draw_uuid": draw_uuid}
@@ -451,7 +325,7 @@ def lottery_prize_text(prize_code, credit_amount):
 
 
 # --------------------------------------------------------------------------
-# /v2/report 事件上报（实测打通形状）
+# /v2/report 事件上报
 # --------------------------------------------------------------------------
 def report_events(auth, events, host=CLOUD_AGENT, extra_headers=None):
     """POST {host}/v2/report，body=[event,...]。返回 (http_status, resp_dict)。"""
@@ -464,7 +338,7 @@ def report_events(auth, events, host=CLOUD_AGENT, extra_headers=None):
 # school 开学季专家（BackToSchool 分类）——expert_use 判据载体
 # --------------------------------------------------------------------------
 SCHOOL_EXPERT_CATEGORY = "16-BackToSchool"   # 分类 id（带数字前缀，list API 不做归一化）
-SCHOOL_EXPERT_FALLBACK = {                    # 若分类专家列表拉取失败，回落已知实测专家
+SCHOOL_EXPERT_FALLBACK = {                    # 若分类专家列表拉取失败，回落已知专家
     "ex_jB0dyFIQJEWa": {"name": "论小舟", "title": "论文写作导师"},
     "ex_lQjkerakvIex": {"name": "英语学习教练", "title": "大学英语学习教练"},
 }
@@ -477,8 +351,7 @@ def fetch_school_expert(token):
       body {page:1,page_size:20,sort_by:"use_count",sort_order:"desc",
             categories:["16-BackToSchool"],expert_type:"agent",
             edition_mode:"all,domestic"}
-    返回 (expert_id, display_name, profession) 元组；列表空/失败回落已知专家。
-    2026-09-13 实测：该分类下 14 个专家，任一 expert_actual_use 均可点亮。"""
+    返回 (expert_id, display_name, profession) 元组；列表空/失败回落已知专家。"""
     body = {"edition_mode": "all,domestic", "page": 1, "page_size": 20,
             "sort_by": "use_count", "sort_order": "desc",
             "categories": [SCHOOL_EXPERT_CATEGORY], "expert_type": "agent"}
@@ -506,9 +379,8 @@ def fetch_school_expert(token):
 def expert_actual_use_event(auth, expert_id, expert_name, conversation_id):
     """expert_actual_use 事件（点亮 expert_use）。
 
-    形状照抄小程序模块 62501 u()（id/name/expertTitle/type/characterCount/
-    expertType）+ 小程序公共字段（模块 22015 wQ/Ao）+ 必须 activityId +
-    conversationId（fake 即可，服务端不校验真实性）。"""
+    事件字段：id/name/expertTitle/type/characterCount/expertType + 公共字段 +
+    必须 activityId + conversationId（服务端不校验真实性）。"""
     now = int(time.time() * 1000)
     return {
         "eventCode": "expert_actual_use", "timestamp": now, "reportDelay": 0,
@@ -533,7 +405,7 @@ def make_expert_event(auth):
 
 def mini_chat_event(auth, conversation_id):
     """小程序域 chat_request_send 事件（点亮 chat_3_times）。
-    形状照抄模块 86692 d() + 必须 activityId=school_open_day_2026（实测关键）。"""
+    必须带 activityId=school_open_day_2026，否则服务端不关联任务。"""
     now = int(time.time() * 1000)
     return {
         "eventCode": "chat_request_send", "timestamp": now, "reportDelay": 0,
@@ -547,7 +419,7 @@ def mini_chat_event(auth, conversation_id):
 
 
 def desktop_fingerprint(auth):
-    """桌面指纹（fork desktop.go）：注入每个桌面事件。与 mini 形状的差异：
+    """桌面指纹：注入每个桌面事件。与 mini 形状的差异：
     ideName=WorkBuddy / extName=workbuddy-desktop / os=win32 / arch=x64 /
     osVersion=10.0.26220 / machineId/sessionId 稳定派生。"""
     now = int(time.time() * 1000)
@@ -567,7 +439,7 @@ def desktop_fingerprint(auth):
 
 
 def desktop_chat_sequence(auth, conversation_id, request_id, message_id):
-    """桌面端成功对话 6 连事件链（fork DesktopChatSequence）：
+    """桌面端成功对话 6 连事件链：
     agent_task_created -> chat_message_send -> chat_request_send ->
     chat_message_response -> chat_message_status -> chat_request_response。
     必须整体上报（一次 6 连 = 一次桌面对话）+ activityId。"""
@@ -656,7 +528,7 @@ def make_report_events(auth, kind):
             m.update(fp)
             m["activityId"] = ACTIVITY_ID
             events.append(m)
-        # 桌面上报走 copilot 域（实测：发 codebuddy.cn 域不点亮桌面任务）
+        # 桌面上报走 copilot 域；发 codebuddy.cn 域不点亮桌面任务
         return events, COPILOT, {"X-Product": "SaaS", "User-Agent": DESKTOP_UA}
     raise ValueError(f"未知 report_kind: {kind}")
 
@@ -718,7 +590,7 @@ def run_account(auth, opts, stats):
                 print(f"[school2026] {uid8} {code}: viewed 激活 pending->in_progress")
                 time.sleep(opts.gap)
             # 2) 触发完成判据。share 一次即完成；report 按 target-当前进度 循环触发
-            #    （每次事件独立 +1，实测 chat_3_times / desktop_chat_1_time 各次计数）。
+            #    （每次事件独立 +1）。
             cur_prog = t.get("progress") or 0
             if mode == "share":
                 rounds = 1
@@ -792,12 +664,10 @@ def run_account(auth, opts, stats):
 def lottery_account(auth, opts, stats, count_account=True):
     """抽奖段：查余额 -> 循环抽到空 -> 汇总打印。
 
-    逆向依据 + 实测：
-      GET  /portal/activity/school/config      -> data.chance.balance（只读，抽前查余额）
+    GET  /portal/activity/school/config      -> data.chance.balance（只读，抽前查余额）
       POST /portal/activity/school/wheel/draw  {draw_uuid} -> data.prize_code/credit_amount/
                                                              chance_balance（抽奖 + 扣次数）
-      实测 2026-09-13（多账号 3->0、4->0）：余额逐次 -1，回读一致；
-      余额 0 时再抽 HTTP 409 code=40900 "no chance"（安全边界，脚本借此优雅停）。
+      余额 0 时再抽返回 HTTP 409 code=40900 "no chance"（安全边界，脚本借此优雅停）。
     dry-run 只打印将执行的调用不发送。结果如实记录（含积分/实物券，不编造）。
     count_account=False：供 --run 任务循环收尾复用（账号数已由 run_account 计入）。"""
     uid8 = (auth.get("uid") or "")[:8] or "?"
@@ -847,7 +717,7 @@ def lottery_account(auth, opts, stats, count_account=True):
     prev_bal = bal
     stall = 0
     while bal > 0:
-        draw_uuid = str(uuid.uuid4())  # 每轮一次性，抽后即弃（H5 Et() 行为对齐）
+        draw_uuid = str(uuid.uuid4())  # 每轮一次性，抽后即弃
         try:
             st, r = post_lottery_draw(auth["token"], draw_uuid)
         except (AuthError, RuntimeError) as e:
@@ -898,23 +768,11 @@ def lottery_account(auth, opts, stats, count_account=True):
 
 
 def print_notes():
-    """打印实测状态与未打通说明（对应脚本头部注释，不编造）。"""
+    """打印任务/未打通说明（对应头部风险提示，不编造）。"""
     print("")
-    print("[school2026] 实测打通状态（2026-09-13，五账号验证）：")
-    for line in [
-        "1. share_invite      已点亮并领取（POST /tasks/share-complete {channel:wechat}）",
-        "2. chat_3_times      已点亮并领取（mini chat_request_send + activityId=school_open_day_2026）",
-        "3. desktop_chat_1_time 已点亮并领取（桌面指纹 6 连 + activityId，copilot 域）",
-        "4. expert_use        已点亮并领取（BackToSchool 分类专家 + expert_actual_use + activityId。",
-        "                     突破点：上轮用公益专家 ex_u62qHKzKqLtC 恒 0/1，本轮换用",
-        "                     BackToSchool 专家 ex_jB0dyFIQJEWa/ex_lQjkerakvIex 即点亮，",
-        "                     判据=expert id 必须属于 BackToSchool 分类，无需真实会话）",
-        "5. task_student_verify 人工环节（学生认证），--run 跳过",
-        "6. 幸运大转盘抽奖  已打通并实测抽空（GET /config 查余额 + POST /wheel/draw 抽奖；",
-        "                    实测多账号均抽到余额 0，",
-        "                    中奖内容如 6/66积分 与实物券如实记录；余额 0 再抽 40900 no chance）",
-    ]:
-        print("    " + line)
+    print("[school2026] 说明：非人工任务（share/chat/desktop/expert）自动点亮并领奖；"
+          "task_student_verify 学生认证为人工环节，--run 跳过；"
+          "幸运大转盘将在任务收尾或 --lottery-only 时抽到余额为 0。")
 
 
 def main():
@@ -923,7 +781,7 @@ def main():
     ap.add_argument("--list", action="store_true", help="只读盘点（默认行为）")
     ap.add_argument("--run", action="store_true", help="执行上报/领取动作（需 --yes 放行真实写）")
     ap.add_argument("--lottery-only", action="store_true",
-                    help="只抽奖不做任务（任务已全池完成时日常补抽专用；读余额+抽到空）")
+                    help="只抽奖不做任务（读余额+抽到空）")
     ap.add_argument("--yes", action="store_true", help="放行写操作（配合 --run/--lottery-only）")
     ap.add_argument("--token", default=None, help="显式覆盖 token（不同源凭证逃生门）")
     ap.add_argument("--uid", default="", help="配合 --token 指定 uid（仅日志用）")

@@ -46,8 +46,8 @@ jobs:
           # ---- 治理参数 ----
           canonical-label: 'canonical'
           duplicate-label: 'duplicate'
-          # 上线前 dry-run 起步：只评论不关闭/不创建/不改版，人工验证后再改 false。
-          dry-run: 'true'
+          # 治理正式生效（2026-09-13 重放验证通过后关闭 dry-run）
+          dry-run: 'false'
           maintainer-exempt: 'true'
           # PR 治理：垃圾检测 + 要点提炼 + canonical 关联（永不关闭合法 PR）
           enable-pr-governance: 'true'

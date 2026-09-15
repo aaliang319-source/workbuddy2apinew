@@ -14,3 +14,46 @@ services:
       #   chown -R 10001:10001 ./data
       - ./data:/app/data
       - ./config.json:/app/config.json:ro
+
+  # ── 管理面板（前后端一体，源码在本仓库 gui/ 子目录）──────────────
+  # 前端 React 源码在 gui/web/，构建时 embed 进 Go 二进制（gui/Dockerfile 多阶段）。
+  wbgui:
+    build:
+      context: ./gui
+      args:
+        VERSION: "1.2.1"
+    image: workbuddy2api-gui:latest
+    container_name: workbuddy2api-gui
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      WBGUI_LISTEN: ":8787"
+      # 面板登录凭据 —— 务必修改为强口令
+      WBGUI_USERNAME: "admin"
+      WBGUI_PASSWORD: "workbuddy"
+      # 网关地址与密钥（密钥留空时自动从挂载的网关 config.json 读取）
+      WBGUI_GATEWAY_URL: "http://host.docker.internal:7863"
+      WBGUI_AUTH_DIR: "/app/auths"
+      WBGUI_CONFIG_FILE: "/gateway/config.json"
+      # 凭证属主修正：面板以 root 写入，网关以 uid 10001 读取
+      WBGUI_AUTH_OWNER_UID: "10001"
+      WBGUI_AUTH_OWNER_GID: "10001"
+      WBGUI_BACKUP_DIR: "/data/backups"
+      WBGUI_CREDENTIALS_FILE: "/data/credentials.json"
+      WBGUI_CONTAINER: "workbuddy2api"
+      WBGUI_DANGEROUS_OPS: "false"
+      WBGUI_READ_ONLY: "false"
+    ports:
+      - "8787:8787"
+    volumes:
+      # 面板自身配置（与网关 config.json 字段不同，勿混用路径）
+      - ./gui/config.json:/app/config.json:ro
+      # 与网关共享账号目录 + 网关配置（同仓库内相对路径）
+      - ./auths:/app/auths
+      - ./config.json:/gateway/config.json
+      # 面板数据目录（配置备份/登录凭据持久化）
+      - ./gui/data:/data
+      # docker.sock：供「系统」页重启网关容器（不需要可注释）
+      - /var/run/docker.sock:/var/run/docker.sock
+    # 以 root 运行以读写挂载的凭证与配置（更严格部署见 gui/docker-compose.yml 注释）
+    user: "0:0"

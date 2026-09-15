@@ -23,7 +23,7 @@ func realmPool(t *testing.T) *pool.Pool {
 // 带前缀的模型名按 realm 过滤可用账号，裸名走 cn。
 func TestRealmAwareAvailableForModel(t *testing.T) {
 	p := realmPool(t)
-	fn := realmAwareAvailableForModel(p)
+	fn := realmAwareAvailableForModel(p, false)
 
 	cases := []struct {
 		model string
@@ -48,7 +48,7 @@ func TestRealmAwareAvailableForModelGlobalDisabled(t *testing.T) {
 	t.Cleanup(func() { auth.SetGlobalEnabled(true) })
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "g1", Domain: "www.workbuddy.ai"})
-	fn := realmAwareAvailableForModel(p)
+	fn := realmAwareAvailableForModel(p, false)
 
 	// 开关关闭 → 该 global 账号 Realm()=="cn"（逃生门），对 global: 前缀不可见。
 	if got := fn("global:gpt-5.4"); len(got) != 0 {
@@ -69,7 +69,7 @@ func TestRealmAwareAvailableForModelDefaultOnCNZeroRegression(t *testing.T) {
 	p := pool.New("")
 	p.Add(&auth.Auth{UID: "cn1", Domain: "www.codebuddy.cn"})
 	p.Add(&auth.Auth{UID: "cn2", Domain: ""}) // 空 domain → cn（老 CN 凭证）
-	fn := realmAwareAvailableForModel(p)
+	fn := realmAwareAvailableForModel(p, false)
 
 	cases := []struct {
 		model string

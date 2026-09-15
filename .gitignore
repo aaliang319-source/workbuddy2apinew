@@ -23,9 +23,11 @@ __pycache__/
 # Backups (contains auth tokens)
 backups/
 
-# IDE
+# IDE / 系统
 .idea/
 .vscode/
+.DS_Store
+.codebuddy/
 LOOP.md
 PLAN.md
 SPEC.md

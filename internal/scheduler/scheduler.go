@@ -33,6 +33,9 @@ type Config struct {
 	// 默认 5 条同一 conversationId 内多轮上报把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int
 
+	// ScriptTimeout 脚本类任务（school/cat）子进程超时，<=0 回落 10m。
+	ScriptTimeout time.Duration
+
 	// ExpiringSoonWindow 快过期积分窗口：签到查余额时，把到期时间 <= now+window 的
 	// 套餐余额标记为"快过期"（pool 据此优先消耗，见 entry.creditsExpiring）。
 	// <=0 时禁用分桶（全部归长期，行为与引入前一致）。默认建议 7*24h。
@@ -90,6 +93,9 @@ func New(cfg Config) *Scheduler {
 	if cfg.ActivityReportCount <= 0 {
 		cfg.ActivityReportCount = 1
 	}
+	if cfg.ScriptTimeout <= 0 {
+		cfg.ScriptTimeout = scriptTimeoutDefault
+	}
 	return &Scheduler{cfg: cfg, adoptTried: make(map[string]string)}
 }
 
@@ -146,52 +152,20 @@ const (
 	taskCat
 )
 
-// nextWake 返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务。
-// 多类任务若配到同一小时（如签到与旅行都含 9），该时刻多类任务需一并执行。
-// 已显式禁用的任务不进候选（nextFire 对其零值返回零时间，nextWake 再跳过零时点）。
+// nextWake 返回 now 之后最近的唤醒时刻与需执行的任务。
+// 排程语义唯一来源于纯函数 NextWake（outcome.go）；此处只把导出 Kind 映射回内部 taskKind。
 func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
-	type slot struct {
-		at   time.Time
-		kind taskKind
-	}
-	var slots []slot
-	if !s.cfg.CheckinDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.CheckinHours), taskCheckin})
-	}
-	if !s.cfg.TravelDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.TravelHours), taskTravel})
-	}
-	if !s.cfg.ActivityDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.ActivityHours), taskActivity})
-	}
-	if !s.cfg.KeepaliveDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.KeepaliveHours), taskKeepalive})
-	}
-	if !s.cfg.SchoolDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.SchoolHours), taskSchool})
-	}
-	if !s.cfg.CatDisabled {
-		slots = append(slots, slot{nextFire(now, s.cfg.CatHours), taskCat})
-	}
-	var earliest time.Time
-	for _, sl := range slots {
-		if sl.at.IsZero() {
-			continue
-		}
-		if earliest.IsZero() || sl.at.Before(earliest) {
-			earliest = sl.at
-		}
-	}
-	if earliest.IsZero() {
+	at, kinds := NextWake(now, s.cfg.Spec())
+	if len(kinds) == 0 {
 		return time.Time{}, nil
 	}
-	var kinds []taskKind
-	for _, sl := range slots {
-		if !sl.at.IsZero() && sl.at.Equal(earliest) {
-			kinds = append(kinds, sl.kind)
+	out := make([]taskKind, 0, len(kinds))
+	for _, k := range kinds {
+		if tk, ok := kindToTask(k); ok {
+			out = append(out, tk)
 		}
 	}
-	return earliest, kinds
+	return at, out
 }
 
 // Run 主循环，阻塞直到 ctx 取消。
@@ -233,31 +207,33 @@ func (s *Scheduler) runBatch(ctx context.Context, kinds []taskKind) {
 	wg.Wait()
 }
 
-// dispatch 按任务类型分发到对应执行函数。脚本类（school/cat）失败只记 WARN、
-// 不影响其余任务继续执行（与现有各任务"单账号失败不阻断遍历"同口径）。
-// ctx 传导给带账号间限速的遍历（取消时立即放弃剩余账号），纯脚本类任务不感知。
-func (s *Scheduler) dispatch(ctx context.Context, k taskKind) {
-	switch k {
-	case taskCheckin:
-		s.RunCheckinNow()
-	case taskTravel:
-		s.runTravel(ctx)
-	case taskActivity:
-		s.runActivity(ctx)
-	case taskKeepalive:
-		s.RunKeepaliveNow()
-	case taskSchool:
-		s.RunSchoolNow()
-	case taskCat:
-		s.RunCatNow()
-	}
+// dispatch 按任务类型分发到对应执行函数并返回逐账号结果。脚本类（school/cat）
+// 失败只记 WARN、不影响其余任务继续执行（与现有各任务"单账号失败不阻断遍历"同口径）。
+// ctx 传导给遍历与脚本子进程（取消时立即放弃剩余账号/杀子进程）。
+func (s *Scheduler) dispatch(ctx context.Context, k taskKind) []Outcome {
+	return s.runKindCtx(ctx, taskToKind(k))
 }
 
-// RunCheckinNow 定时触发的立即签到：逐账号结果由 CheckinAll 记日志，此处只兜住"撞车跳过"。
-func (s *Scheduler) RunCheckinNow() {
-	if _, err := s.CheckinAll(); err != nil {
+// RunCheckinCtx 带 ctx 的立即签到（当前 CheckinAll 遍历不检查 ctx，签名保留供
+// 后续接入；手动触发与定时循环统一入口）。
+func (s *Scheduler) RunCheckinCtx(ctx context.Context) []Outcome {
+	_ = ctx // 签到遍历为纯上游串行调用，暂无取消点（见计划"本期不假装有全局超时"）
+	ocs, err := s.CheckinAll()
+	if err != nil {
 		log.Printf("scheduled checkin skipped: %v", err)
+		return nil
 	}
+	out := make([]Outcome, 0, len(ocs))
+	for _, oc := range ocs {
+		out = append(out, outcomeFromCheckin(oc))
+	}
+	return out
+}
+
+// RunCheckinNow 定时/无 ctx 入口触发的立即签到：逐账号结果由 CheckinAll 记日志，
+// 此处只兜住"撞车跳过"。返回值供 automation 记录运行历史（既有调用点可丢弃）。
+func (s *Scheduler) RunCheckinNow() []Outcome {
+	return s.RunCheckinCtx(context.Background())
 }
 
 // CheckinAll 全量签到：按需刷新 token → daily-checkin → 查余额 → 解冻冷却账号。
@@ -395,12 +371,14 @@ func joinDetail(existing, add string) string {
 // RunActivityNow 立即对池内所有可用账号执行对话活跃上报（无 ctx 的外部入口：
 // cmd/activity 一次性触发、测试）。内部走 runActivity，取背景 ctx（不可取消，
 // 语义与引入前 time.Sleep 版一致）。
-func (s *Scheduler) RunActivityNow() {
-	s.runActivity(context.Background())
+func (s *Scheduler) RunActivityNow() []Outcome {
+	return s.runActivity(context.Background())
 }
 
-// runActivity 活跃上报遍历，随 ctx 取消立即退出。
-func (s *Scheduler) runActivity(ctx context.Context) {
+// runActivity 活跃上报遍历，随 ctx 取消立即退出。返回逐账号结果：
+// N 条全发满 → ok（message 带 reports 与 streak 自检结论）；部分/失败 → fail。
+func (s *Scheduler) runActivity(ctx context.Context) []Outcome {
+	out := []Outcome{}
 	count := s.cfg.ActivityReportCount
 	first := true
 	for _, st := range s.cfg.Pool.List() {
@@ -416,7 +394,7 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 		// 单账号失败只记 WARN 不影响遍历（下方 report err → break 该号 → continue 下号）。
 		if !first {
 			if !sleepCtx(ctx, activityAccountDelay) {
-				return // 优雅停机：不等限速睡满，剩余账号下轮再报
+				return out // 优雅停机：不等限速睡满，剩余账号下轮再报
 			}
 		}
 		first = false
@@ -434,16 +412,28 @@ func (s *Scheduler) runActivity(ctx context.Context) {
 			if i < count {
 				// 账号内 5 条之间间隔，避免秒发风控；取消时立即放弃本号剩余条数。
 				if !sleepCtx(ctx, activityReportGap) {
-					return
+					return out
 				}
 			}
 		}
 		if ok < count {
+			out = append(out, Outcome{
+				UID: st.UID, Nickname: st.Nickname, OK: false, Status: "fail",
+				Message: fmt.Sprintf("reports=%d/%d (aborted early)", ok, count),
+			})
 			continue // N 条未发满：streak 自检与领养均无意义，下个账号
 		}
-		s.checkActivityStreak(a) // N 条全发满 → 回读 streak 自检（只留结论行）
-		s.travelAdoptForce(a)    // 无猫账号对话量刚补满 → 立即重试领养（豁免防抖）
+		suspicious := s.checkActivityStreak(a) // N 条全发满 → 回读 streak 自检（只留结论行）
+		s.travelAdoptForce(a)                  // 无猫账号对话量刚补满 → 立即重试领养（豁免防抖）
+		msg := fmt.Sprintf("reports=%d/%d", ok, count)
+		if suspicious {
+			// 上报 200 但 streak 可疑（静默丢弃/回读失败）：仍记 ok（上报本身成功），
+			// 但把可疑信号带进历史，便于面板一眼看出。
+			msg += " streak_check=suspicious"
+		}
+		out = append(out, Outcome{UID: st.UID, Nickname: st.Nickname, OK: true, Status: "ok", Message: msg})
 	}
+	return out
 }
 
 // checkActivityStreak 上报成功后回读连登天数（只读 oracle，发现静默失败）。
@@ -471,23 +461,36 @@ func (s *Scheduler) checkActivityStreak(a *auth.Auth) bool {
 // 12153 禁用走 Pool.NoteSessionDead 的**连续计数**语义：一次刷新失败不再立即杀号，
 // 连续 sessionDeadThreshold 次（3 次）才禁用（P0-1：13 个 disabled 号全是历史误判）。
 // 刷新成功 → ClearSessionDead 清计数（错误判定的账号有复活路径）。
-func (s *Scheduler) RunKeepaliveNow() {
+func (s *Scheduler) RunKeepaliveNow() []Outcome {
+	return s.RunKeepaliveCtx(context.Background())
+}
+
+// RunKeepaliveCtx 带 ctx 的 token 保活（当前遍历不检查 ctx，签名保留供后续接入）。
+// 返回逐账号结果：刷新成功 ok；12153 session dead 且达阈值禁用 → fail(disabled)。
+func (s *Scheduler) RunKeepaliveCtx(ctx context.Context) []Outcome {
+	_ = ctx // 遍历为纯上游串行调用，暂无取消点
+	out := []Outcome{}
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
+			out = append(out, Outcome{UID: st.UID, Nickname: st.Nickname, OK: false, Status: "skipped", Message: "disabled"})
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshToken == "" {
+			out = append(out, Outcome{UID: st.UID, Nickname: st.Nickname, OK: false, Status: "skipped", Message: "no credentials"})
 			continue
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {
 			log.Printf("keepalive %s: %v", logfmt.UID8(st.UID), err)
+			msg := err.Error()
 			var ue *upstream.Error
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
 				if s.cfg.Pool.NoteSessionDead(st.UID) {
 					log.Printf("WARN: keepalive %s: 连续 %d 次 12153 session dead — 禁用", logfmt.UID8(st.UID), pool.SessionDeadThreshold())
+					msg = "session dead (disabled)"
 				}
 			}
+			out = append(out, Outcome{UID: st.UID, Nickname: st.Nickname, OK: false, Status: "fail", Message: msg})
 			continue
 		}
 		s.cfg.Pool.ClearSessionDead(st.UID) // 刷新成功清误判计数，失败不该累计
@@ -495,5 +498,7 @@ func (s *Scheduler) RunKeepaliveNow() {
 		if err := a.SaveAtomic(); err != nil {
 			log.Printf("keepalive %s save: %v", logfmt.UID8(st.UID), err)
 		}
+		out = append(out, Outcome{UID: st.UID, Nickname: st.Nickname, OK: true, Status: "ok"})
 	}
+	return out
 }

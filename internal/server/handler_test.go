@@ -534,7 +534,7 @@ func TestApplyErrorPolicyAccountFaultSplit(t *testing.T) {
 		p.Add(&auth.Auth{UID: "u1"})
 		h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
 
-		h.applyErrorPolicy("u1", upstream.ErrAccountFault, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, "glm-5.2")
+		h.applyErrorPolicy("u1", upstream.ErrAccountFault, `{"error":{"data":{"code":11140,"msg":"request illegal"}}}`, "glm-5.2", 0)
 		st, _ := p.Status("u1")
 		if !st.Disabled {
 			t.Fatalf("11140 应硬禁用: %+v", st)
@@ -552,7 +552,7 @@ func TestApplyErrorPolicyAccountFaultSplit(t *testing.T) {
 		p.Add(&auth.Auth{UID: "u1"})
 		h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
 
-		h.applyErrorPolicy("u1", upstream.ErrAccountFault, `{"error":{"data":{"code":14017,"msg":"The trial version is not yet activated"}}}`, "glm-5.2")
+		h.applyErrorPolicy("u1", upstream.ErrAccountFault, `{"error":{"data":{"code":14017,"msg":"The trial version is not yet activated"}}}`, "glm-5.2", 0)
 		st, _ := p.Status("u1")
 		if st.Disabled {
 			t.Fatalf("14017 不应禁用: %+v", st)
@@ -576,7 +576,7 @@ func TestApplyErrorPolicySoftRateNoDoubleWhenCooling(t *testing.T) {
 	h := NewHandler(Config{Pool: p, SoftCooldown: 600 * time.Second})
 
 	// 第 1 次：进入冷却，streak=1，600s（固定基数，无重置时间）。
-	h.applyErrorPolicy("u1", upstream.ErrSoftRate, "", "")
+	h.applyErrorPolicy("u1", upstream.ErrSoftRate, "", "", 0)
 	st, _ := p.Status("u1")
 	if !st.Cooling || st.CoolKind != "soft_rate" {
 		t.Fatalf("call 1: 应为 soft_rate 冷却: %+v", st)
@@ -591,7 +591,7 @@ func TestApplyErrorPolicySoftRateNoDoubleWhenCooling(t *testing.T) {
 	// 冷却中重复触发（兜底探测）→ 不翻倍、不推进 streak。
 	before := st.CoolRemaining
 	for n := 0; n < 3; n++ {
-		h.applyErrorPolicy("u1", upstream.ErrSoftRate, "", "")
+		h.applyErrorPolicy("u1", upstream.ErrSoftRate, "", "", 0)
 	}
 	st, _ = p.Status("u1")
 	if st.SoftStreak != 1 {
@@ -616,7 +616,7 @@ func TestApplyErrorPolicySoftRateResetTime11140(t *testing.T) {
 	ts := reset.In(upstream.SoftRateResetLoc()).Format("2006-01-02 15:04:05")
 	body := `{"code":11140,"msg":"The model provider is rate-limiting requests. 将在 ` + ts + ` UTC+8 重置"}`
 
-	h.applyErrorPolicy("u1", upstream.ErrSoftRate, body, "glm-5.3")
+	h.applyErrorPolicy("u1", upstream.ErrSoftRate, body, "glm-5.3", 0)
 	st, ok := p.Status("u1")
 	if !ok {
 		t.Fatal("u1 missing")
@@ -648,7 +648,7 @@ func TestApplyErrorPolicyNotFoundUsesFixedBase(t *testing.T) {
 
 	notFoundSec := int64(notFoundCooldown / time.Second)
 	for i := 0; i < 3; i++ {
-		h.applyErrorPolicy("u1", upstream.ErrNotFound, "", "")
+		h.applyErrorPolicy("u1", upstream.ErrNotFound, "", "", 0)
 		st, _ := p.Status("u1")
 		if !st.Cooling || st.CoolKind != "soft_rate" {
 			t.Fatalf("call %d: 应为 soft 冷却: %+v", i+1, st)

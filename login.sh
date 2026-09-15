@@ -167,7 +167,7 @@ WB2A_LOGIN_REALM="$REALM" \
 WB2A_LOGIN_AUTH_FILE="$AUTH_FILE" \
 WB2A_LOGIN_ACTION="$ACTION" \
 python3 - <<'PYEOF'
-import json, os, tempfile
+import json, os, sys, tempfile
 
 auth = {
     "account": {
@@ -183,6 +183,25 @@ auth = {
         "realm": os.environ["WB2A_LOGIN_REALM"]
     }
 }
+# 覆盖路径下 os.replace 换的是全新 inode，属主/权限跟随当前进程（root 跑则为 0:0 600），
+# bind mount 下容器内 app(10001) 读不到。修复策略（双保险）：
+#   1) root 运行（面板容器内 docker exec 场景）→ 写文件前先降权到网关运行用户
+#      10001:10001（Dockerfile USER app 写死），文件天生属主正确，不依赖 chown——
+#      Docker Desktop VirtioFS 会静默忽略 chown，降权是唯一可靠手段。
+#      WB2A_AUTH_CHOWN_UID/GID 可显式覆盖目标（缺省 10001/同 UID）。
+#   2) 落盘后再 chown 兜底（覆盖 setuid 失败且文件系统支持 chown 的场景），
+#      终检属主非 10001 即大声报错并给修复命令，不留静默坏文件。
+target_uid_str = os.environ.get("WB2A_AUTH_CHOWN_UID", "").strip()
+target_uid = int(target_uid_str) if target_uid_str else 10001
+target_gid = int(os.environ.get("WB2A_AUTH_CHOWN_GID", target_uid_str or target_uid))
+if os.getuid() == 0 and os.getuid() != target_uid:
+    try:
+        os.setgid(target_gid)
+        os.setgroups([])
+        os.setuid(target_uid)
+    except OSError as e:
+        print(f"警告: 降权到 {target_uid}:{target_gid} 失败（{e}），将尝试 chown 兜底")
+
 auth_file = os.environ["WB2A_LOGIN_AUTH_FILE"]
 fd, tmp_file = tempfile.mkstemp(prefix=".workbuddy-auth-", dir=os.path.dirname(auth_file) or ".")
 try:
@@ -195,6 +214,20 @@ except Exception:
     except FileNotFoundError:
         pass
     raise
+# chown 兜底：仅当仍是 root（降权失败或 target 为 root）且未跑在 macOS 宿主机时执行——
+# Docker Desktop VirtioFS 对 bind mount 的 chown 静默无效，跳过避免误导。
+if os.getuid() == 0 and sys.platform != "darwin":
+    try:
+        os.chown(auth_file, target_uid, target_gid)
+        print(f"属主已修正: {target_uid}:{target_gid}")
+    except OSError as e:
+        print(f"警告: chown {auth_file} 失败（{e}），容器内可能无法读取")
+# 终检：属主必须是 10001（网关运行用户），否则大声报错提示手工修复，不留静默坏文件。
+# macOS 宿主机跳过（VirtioFS bind mount 下宿主 uid 不影响容器内可见性，避免误报）。
+st = os.stat(auth_file)
+if st.st_uid != 10001 and not (sys.platform == "darwin" and os.getuid() != 0):
+    print(f"警告: {auth_file} 属主为 {st.st_uid}（期望 10001），网关 app 用户将无法读取！"
+          f"请在宿主机执行: chown 10001:10001 {auth_file}")
 print(f"已保存（{os.environ['WB2A_LOGIN_ACTION']}）: {auth_file}")
 PYEOF
 

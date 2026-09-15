@@ -29,6 +29,26 @@ type chatStat struct {
 	toks   int // <0 表示 usage 缺失 → 显示 "-"
 	status int
 
+	// metrics 观测载荷（/v1/stats）：两个汇合点（流式/非流式）填入，
+	// observeMetrics 在出口统一上报一次。m* 前缀与日志字段区分。
+	mPrompt   int64
+	mHit      int64 // usage.prompt_cache_hit_tokens（缺失 0）
+	mMiss     int64 // usage.prompt_cache_miss_tokens（缺失 0）
+	mWrite    int64 // usage.prompt_cache_write_tokens（缺失 0）
+	mCredit   float64
+	mCreditOK bool // usage.credit 显式出现过（缺失≠0）
+	mHasCache bool // 上游出现过任一 cache 字段（决定 hit_rate 口径）
+
+	// errMsg 失败原因（权威分类，如 "hard_credit(402)"）：仅非 200 请求由轮转
+	// 循环错误路径设置，observeMetrics 出口带进单条请求明细。刻意只存分类不存
+	// 上游原始 Msg——明细会展示给面板用户，原文可能泄露账号 UID 与内部错误码。
+	errMsg string
+
+	// 单条明细的三个诊断维度（observeMetrics 出口带进 RequestRecord）：
+	proto   string // "openai" / "anthropic"（响应协议来源）
+	keyName string // 业务 Key 名（多 Key 模式；旧单 Key 模式为空）
+	tries   int    // 轮转尝试次数（真正出站的尝试，Acquire 竞态失败不计）
+
 	logged bool
 }
 
@@ -60,10 +80,15 @@ type chatStatsReader struct {
 	seen      bool // 已见过首个 data 帧（TTFB 只记一次）
 	hasUsage  bool // 末帧是否带 usage
 	hasCredit bool // 是否出现过带 credit 的 usage（缺失≠0，见 Credit() 注释）
+	hasCache  bool // 是否出现过任一 prompt_cache_* 字段（缺失≠全 0）
 	tokens    int
 	credit    float64 // 末帧 usage.credit（本次真实扣费，供成本账本）
 	prompt    int     // 末帧 usage.prompt_tokens（与 completion 合计折算单价）
-	pend      []byte  // 已读未返回的行缓存
+
+	cacheHit   int64  // 末帧 usage.prompt_cache_hit_tokens
+	cacheMiss  int64  // 末帧 usage.prompt_cache_miss_tokens
+	cacheWrite int64  // 末帧 usage.prompt_cache_write_tokens
+	pend       []byte // 已读未返回的行缓存
 }
 
 // newChatStatsReaderSince 以 since 为 TTFB 计时起点（通常是请求进入 handler 的时刻）。
@@ -85,6 +110,15 @@ func (s *chatStatsReader) Credit() (float64, bool) { return s.credit, s.hasUsage
 // TotalTokens 返回本次请求总 token 数（prompt + completion），供成本单价折算。
 func (s *chatStatsReader) TotalTokens() int { return s.prompt + s.tokens }
 
+// PromptTokens 返回末帧 usage.prompt_tokens 与是否缺失。
+func (s *chatStatsReader) PromptTokens() (int, bool) { return s.prompt, s.hasUsage }
+
+// Cache 返回末帧 usage 的 prompt_cache_* 三元组。ok=true 要求 usage 存在且
+// 至少一个 cache 字段显式出现（全缺 = 上游没开缓存观测，ok=false）。
+func (s *chatStatsReader) Cache() (hit, miss, write int64, ok bool) {
+	return s.cacheHit, s.cacheMiss, s.cacheWrite, s.hasUsage && s.hasCache
+}
+
 // parseSSELine 解析一行 "data: {...}"：首帧记 TTFB，含 usage 时采信精确 completion_tokens。
 func (s *chatStatsReader) parseSSELine(line string) {
 	line = strings.TrimRight(line, "\r\n")
@@ -104,6 +138,11 @@ func (s *chatStatsReader) parseSSELine(line string) {
 			CompletionTokens int      `json:"completion_tokens"`
 			PromptTokens     int      `json:"prompt_tokens"`
 			Credit           *float64 `json:"credit"` // 指针区分「缺失」与「显式 0」
+			// prompt_cache_*：上游缓存命中观测（cache_key.go：hit 直接影响 credit 量级）。
+			// 指针区分「缺失」与「显式 0」，任一出现即视为缓存观测开启。
+			PromptCacheHitTokens   *int64 `json:"prompt_cache_hit_tokens"`
+			PromptCacheMissTokens  *int64 `json:"prompt_cache_miss_tokens"`
+			PromptCacheWriteTokens *int64 `json:"prompt_cache_write_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal([]byte(payload), &chunk) != nil || chunk.Usage == nil {
@@ -115,6 +154,18 @@ func (s *chatStatsReader) parseSSELine(line string) {
 	if chunk.Usage.Credit != nil {
 		s.hasCredit = true
 		s.credit = *chunk.Usage.Credit
+	}
+	if u := chunk.Usage; u.PromptCacheHitTokens != nil || u.PromptCacheMissTokens != nil || u.PromptCacheWriteTokens != nil {
+		s.hasCache = true
+		if u.PromptCacheHitTokens != nil {
+			s.cacheHit = *u.PromptCacheHitTokens
+		}
+		if u.PromptCacheMissTokens != nil {
+			s.cacheMiss = *u.PromptCacheMissTokens
+		}
+		if u.PromptCacheWriteTokens != nil {
+			s.cacheWrite = *u.PromptCacheWriteTokens
+		}
 	}
 }
 
@@ -174,6 +225,35 @@ func usageCreditTotal(resp map[string]any) (credit float64, total int, ok bool) 
 		return 0, 0, false
 	}
 	return c, int(pt) + int(ct), true
+}
+
+// usagePromptTokens 从聚合响应提取 usage.prompt_tokens；缺失返回 false。
+func usagePromptTokens(resp map[string]any) (int64, bool) {
+	u, ok := resp["usage"].(map[string]any)
+	if !ok {
+		return 0, false
+	}
+	v, ok := u["prompt_tokens"].(float64)
+	if !ok {
+		return 0, false
+	}
+	return int64(v), true
+}
+
+// usageCacheTokens 从聚合响应提取 usage 的 prompt_cache_* 三元组。
+// ok=true 要求 usage 存在且至少一个 cache 字段显式出现（与流式 Cache() 同口径）。
+func usageCacheTokens(resp map[string]any) (hit, miss, write int64, ok bool) {
+	u, isMap := resp["usage"].(map[string]any)
+	if !isMap {
+		return 0, 0, 0, false
+	}
+	h, hasHit := u["prompt_cache_hit_tokens"].(float64)
+	m, hasMiss := u["prompt_cache_miss_tokens"].(float64)
+	w, hasWrite := u["prompt_cache_write_tokens"].(float64)
+	if !hasHit && !hasMiss && !hasWrite {
+		return 0, 0, 0, false
+	}
+	return int64(h), int64(m), int64(w), true
 }
 
 // uidPrefix 只显示 uid 前 8 位；空 uid 显示 "-"。

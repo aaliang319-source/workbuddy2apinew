@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDefault(t *testing.T) {
@@ -722,5 +723,114 @@ func TestUpstreamUserAgentConfig(t *testing.T) {
 	}
 	if c3.Upstream.UserAgent != "EnvAgent/9" {
 		t.Errorf("env user_agent=%q want EnvAgent/9", c3.Upstream.UserAgent)
+	}
+}
+
+// ── 通知（邮箱提醒）配置 ────────────────────────────────────────────────
+
+func TestNotifyDefaults(t *testing.T) {
+	c := Default()
+	if err := c.normalize(); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if c.Notify.Enabled {
+		t.Error("notify should default disabled")
+	}
+	if c.Notify.SMTPPort != 587 || c.Notify.SMTPTLS != "starttls" {
+		t.Errorf("smtp defaults wrong: port=%d tls=%s", c.Notify.SMTPPort, c.Notify.SMTPTLS)
+	}
+	if c.Notify.CreditsThreshold != 100 || c.Notify.ExpiringDays != 7 {
+		t.Errorf("threshold defaults wrong: %+v", c.Notify)
+	}
+	if c.NotifyThrottleDur != 6*time.Hour {
+		t.Errorf("throttle=%v want 6h", c.NotifyThrottleDur)
+	}
+	if c.NotifyExpiringWin != 7*24*time.Hour {
+		t.Errorf("expiring window=%v want 168h", c.NotifyExpiringWin)
+	}
+	if len(c.Notify.ScanHours) != 2 || c.Notify.ScanHours[0] != 10 || c.Notify.ScanHours[1] != 22 {
+		t.Errorf("scan hours=%v want [10 22]", c.Notify.ScanHours)
+	}
+}
+
+func TestNotifyEnabledRequiresSMTP(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"notify":{"enabled":true}}`), 0o600)
+	if _, err := Load(fp); err == nil {
+		t.Fatal("enabled without smtp_host/from/to must fail fast")
+	}
+	// 补齐必需项后应加载成功。
+	os.WriteFile(fp, []byte(`{"notify":{"enabled":true,"smtp_host":"smtp.x.com","smtp_from":"a@x.com","smtp_to":["b@x.com"],"smtp_tls":"ssl","smtp_port":70000,"scan_hours":[23,9,9,99]}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatalf("load with full smtp: %v", err)
+	}
+	if c.Notify.SMTPTLS != "starttls" {
+		t.Errorf("invalid tls should fall back to starttls, got %s", c.Notify.SMTPTLS)
+	}
+	if c.Notify.SMTPPort != 587 {
+		t.Errorf("invalid port should fall back to 587, got %d", c.Notify.SMTPPort)
+	}
+	if got := c.Notify.ScanHours; len(got) != 2 || got[0] != 9 || got[1] != 23 {
+		t.Errorf("scan hours dedupe/sort/range failed: %v", got)
+	}
+	nc, err := c.BuildNotifyConfig()
+	if err != nil {
+		t.Fatalf("build notify config: %v", err)
+	}
+	if !nc.Enabled || nc.Host != "smtp.x.com" || len(nc.To) != 1 {
+		t.Errorf("notify config mapping wrong: %+v", nc)
+	}
+}
+
+func TestNotifyEventsExplicitOff(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "c.json")
+	os.WriteFile(fp, []byte(`{"notify":{"events":{"credits_low":false}}}`), 0o600)
+	c, err := Load(fp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nc, err := c.BuildNotifyConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nc.Events.CreditsLow {
+		t.Error("explicit credits_low=false must be preserved")
+	}
+	if !nc.Events.Exhausted || !nc.Events.AccountSwitch {
+		t.Error("unspecified events should default to enabled")
+	}
+}
+
+func TestNotifyEnvOverride(t *testing.T) {
+	t.Setenv("WB2A_NOTIFY_ENABLED", "true")
+	t.Setenv("WB2A_SMTP_HOST", "smtp.env.com")
+	t.Setenv("WB2A_SMTP_FROM", "bot@env.com")
+	t.Setenv("WB2A_SMTP_TO", "a@env.com, b@env.com ,")
+	t.Setenv("WB2A_SMTP_TLS", "tls")
+	t.Setenv("WB2A_NOTIFY_CREDITS_THRESHOLD", "250")
+	t.Setenv("WB2A_NOTIFY_EXPIRING_DAYS", "3")
+	t.Setenv("WB2A_NOTIFY_THROTTLE_HOURS", "2")
+	t.Setenv("WB2A_NOTIFY_SCAN_HOURS", "8,20")
+	c, err := Load("")
+	if err != nil {
+		t.Fatalf("load with env: %v", err)
+	}
+	if !c.Notify.Enabled || c.Notify.SMTPHost != "smtp.env.com" || c.Notify.SMTPTLS != "tls" {
+		t.Errorf("env smtp override wrong: %+v", c.Notify)
+	}
+	if len(c.Notify.SMTPTo) != 2 {
+		t.Errorf("smtp_to split wrong: %v", c.Notify.SMTPTo)
+	}
+	if c.Notify.CreditsThreshold != 250 || c.Notify.ExpiringDays != 3 || c.NotifyThrottleDur != 2*time.Hour {
+		t.Errorf("env thresholds wrong: %+v", c.Notify)
+	}
+	if c.NotifyExpiringWin != 3*24*time.Hour {
+		t.Errorf("expiring window=%v want 72h", c.NotifyExpiringWin)
+	}
+	if got := c.Notify.ScanHours; len(got) != 2 || got[0] != 8 || got[1] != 20 {
+		t.Errorf("env scan hours wrong: %v", got)
 	}
 }

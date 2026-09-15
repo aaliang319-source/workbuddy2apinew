@@ -31,6 +31,9 @@ type Status struct {
 	Realm         string    `json:"realm,omitempty"`
 	Nickname      string    `json:"nickname,omitempty"`
 	Credits       int64     `json:"credits"`
+	// CreditsExpiring credits 中快过期的子集（通知模块判定"额度即将耗尽"用；
+	// 选号权重另有 expiringWeight 逻辑）。
+	CreditsExpiring int64 `json:"credits_expiring,omitempty"`
 	Cooling       bool      `json:"cooling"`
 	CoolKind      string    `json:"cool_kind,omitempty"`
 	CoolRemaining int64     `json:"cool_remaining_sec,omitempty"`

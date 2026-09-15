@@ -9,9 +9,22 @@
   OAuth 登录 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 积分补充
 </p>
 
+> ## 📢 上游声明 / Upstream Notice
+>
+> 本仓库是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的**衍生版本 (fork)**,
+> 基于原作者于 2026 年以 **MIT License** 发布的代码。
+> 原作者的版权与许可证完整保留于 [`LICENSE`](./LICENSE),使用、复制、修改与再分发须遵守 MIT 条款。
+>
+> 本 fork 由 `aaliang319-source` 维护,**与原作者无任何关联,亦未获原作者背书**。
+> 本 fork 中所有新增 / 修改内容同样以 MIT License 发布。
+> `WorkBuddy` / `CodeBuddy` / `Tencent` 等名称及 LOGO 归各自权利人所有,本仓库不主张任何商标或代理权。
+> 请遵守 CodeBuddy / WorkBuddy 平台服务条款与所在地法律后再使用本项目。
+
 <p align="center">
   <img alt="Go" src="https://img.shields.io/badge/Go-1.22.5-00ADD8?logo=go&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
+  <img alt="Anthropic" src="https://img.shields.io/badge/API-Anthropic_Compatible-D97757?style=flat-square">
+  <img alt="Responses" src="https://img.shields.io/badge/API-Responses_Compatible-10A37F?style=flat-square">
   <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Docker_Compose-2496ED?logo=docker&logoColor=white&style=flat-square">
   <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
   <a href="https://t.me/sliverkiss_blog"><img alt="Telegram" src="https://img.shields.io/badge/Telegram-%E9%A2%91%E9%81%93-blue?logo=telegram&logoColor=white&style=flat-square"></a>
@@ -79,6 +92,19 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将 ``
 - 领养联动 / 任务查询：`scripts/task_runner.py`（成长任务一体机，默认 dry-run）
 - 个性化提示词：`prompt.file` 指向自定义提示词文件即整体替换内置默认
 
+### 新增子系统
+
+- **`internal/keys`** — 网关侧 API Key 管理（生成 / 撤销 / 限流），不再依赖单一静态 `api_key`
+- **`internal/metrics`** — 账号 × 模型级调用次数 / 成功率 / 平均时延 / 积分消耗指标，本地 `data/metrics.json` 持久化（可选 Redis 镜像）
+- **`internal/notify`** — 通知派发，额度告警 / 异常事件通过 SMTP 模板化推送
+- **`internal/automation`** — 自动化引擎，定时任务结果通过 `data/automation.json` 留痕，供面板回放
+
+### 协议适配
+
+- **`/v1/chat/completions`** — OpenAI 兼容流式 / 非流式（默认）
+- **`/v1/responses`** — OpenAI Responses API 适配
+- **`/v1/messages`** — Anthropic Messages API 兼容，支持 `claude-*` 模型路由到 CodeBuddy 对应模型
+
 ## 架构总览
 
 ```mermaid
@@ -88,9 +114,9 @@ flowchart LR
     subgraph GWI["WorkBuddy2API 网关 :7863"]
         H["HTTP Handler\n鉴权 · 请求体上限 · 提示词改写 · 轮转"] --> P
         H --> S
-        P["账号池\n三因子加权 · 熔断 · 冷却 · 租约"] --> U
+        P["账号池\n四因子加权 · 熔断 · 冷却 · 租约"] --> U
         S["会话粘性路由"] -.绑定镜像.-> REDIS
-        T["定时调度\n签到 09/21 · 旅行 09/21 · 活跃 10 · 保活 22"] --> P
+        T["定时调度\n签到 09/21 · 旅行 09/21 · 活跃 10 · 保活 22\n开学季 12 · 夜猫子 01"] --> P
         U["上游 Client\nChatHTTP 流式 · 短 RPC"]
     end
 
@@ -178,7 +204,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 ### 发布来源与合规边界
 
-- **无预编译 release**：仓库无 Release / tag，产物 = 源码自构建（Dockerfile 多阶段在本地构建时完成）
+- **CI 自动打包**：GitHub Actions（`.github/workflows/build.yml`）每日定时 + push tag 触发多架构（amd64/arm64）构建，发布至 `ghcr.io`，同时输出 amd64 离线 `tar.gz` artifact 供 NAS / 离线环境使用；也可本地 `docker compose build` 自构建
 - 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
 - **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
 - 上游 CodeBuddy 属第三方商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责

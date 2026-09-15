@@ -3,20 +3,36 @@
   "api_key": "test_key",
   "auth_dir": "./auths",
   "state_file": "./data/state.json",
+  "keys_file": "./data/keys.json",
   "server": {
-    "max_body_mb": 8
+    "max_body_mb": 8,
+    "metrics_enabled": true
   },
   "cooldown": {
     "soft_rate": "600s",
     "soft_rate_max": "2h"
   },
   "schedule": {
-    "checkin_hours": [9, 21],
-    "travel_hours": [9, 21],
-    "activity_hours": [10],
-    "keepalive_hours": [22],
-    "school_hours": [12],
-    "cat_hours": [1],
+    "checkin_hours": [
+      9,
+      21
+    ],
+    "travel_hours": [
+      9,
+      21
+    ],
+    "activity_hours": [
+      10
+    ],
+    "keepalive_hours": [
+      22
+    ],
+    "school_hours": [
+      12
+    ],
+    "cat_hours": [
+      1
+    ],
     "checkin_enabled": true,
     "travel_enabled": true,
     "activity_enabled": true,
@@ -27,7 +43,8 @@
   "global": {
     "enabled": true,
     "chat_base": "",
-    "billing_base": ""
+    "billing_base": "",
+    "mix_realms": false
   },
   "upstream": {
     "timeout_seconds": 120,
@@ -65,5 +82,18 @@
     "enabled": true,
     "ttl": "30m",
     "gc_interval": "5m"
+  },
+  "anthropic": {
+    "default_model": "cn:auto",
+    "model_map": {
+      "claude-sonnet-4-5": "cn:glm-5.3",
+      "claude-haiku-4-5": "cn:auto"
+    }
+  },
+  "automation": {
+    "enabled": true,
+    "history_file": "./data/automation.json",
+    "script_timeout": "10m",
+    "history_runs": 100
   }
 }

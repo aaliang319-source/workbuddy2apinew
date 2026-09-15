@@ -50,6 +50,11 @@ func (p *Pool) disableLocked(e *entry, reason string) {
 	e.disabled = true
 	e.reason = reason
 	p.dirty.Store(true)
+	// 通知：账号被禁用（最强不可用终态），流量转移。
+	p.notifyLocked(NoticeEvent{
+		Kind: "disabled", UID: e.a.UID, Nickname: e.a.Nickname, Realm: e.a.Realm(),
+		Reason: reason, Credits: e.credits, Expiring: e.creditsExpiring,
+	})
 }
 
 // reviveCoolingLocked 只清冷却域（until/coolKind/reason/softStreak/modelCooldowns）

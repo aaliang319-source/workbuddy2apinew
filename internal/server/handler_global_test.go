@@ -47,11 +47,11 @@ func newRealmFake(t *testing.T) *realmFake {
 				Body:       io.NopCloser(strings.NewReader(sseOK)),
 			}, nil
 		})},
-		ChatBaseCN:       "https://fake.cn",
-		BillingBaseCN:    "https://fake.cn",
-		ChatBaseGlobal:   "https://fake.global",
+		ChatBaseCN:        "https://fake.cn",
+		BillingBaseCN:     "https://fake.cn",
+		ChatBaseGlobal:    "https://fake.global",
 		BillingBaseGlobal: "https://fake.global",
-		GlobalEnabled:    true,
+		GlobalEnabled:     true,
 	}
 	return cf
 }

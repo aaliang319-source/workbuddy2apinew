@@ -1,0 +1,6 @@
+# gui 面板构建上下文瘦身：依赖在容器内 npm ci 安装，不需要宿主机 node_modules。
+web/node_modules
+.git
+data
+Dockerfile
+docker-compose.yml

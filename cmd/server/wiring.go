@@ -13,9 +13,15 @@ import (
 //
 // realm 为空串时 pool.AvailableUIDsForModelRealm 退化为现状（AvailableUIDsForModel），
 // 老调用（无前缀模型名）语义零改动。
-func realmAwareAvailableForModel(p *pool.Pool) func(model string) []string {
+//
+// mix=true（config global.mix_realms）时忽略 realm 前缀，返回两域混合的可用集合——
+// 与选号侧 pickRealm="" 同口径，否则粘性重绑定会把 global 账号挡在 CN 请求之外。
+func realmAwareAvailableForModel(p *pool.Pool, mix bool) func(model string) []string {
 	return func(model string) []string {
 		realm, bare := server.ResolveModel(model)
+		if mix {
+			realm = ""
+		}
 		return p.AvailableUIDsForModelRealm(bare, realm)
 	}
 }

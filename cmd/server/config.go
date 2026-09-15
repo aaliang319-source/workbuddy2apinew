@@ -5,20 +5,29 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"workbuddy2api/internal/config"
+	"workbuddy2api/internal/notify"
 	"workbuddy2api/internal/prompt"
 )
 
 // Config 顶层配置。
 type Config struct {
 	Listen    string `json:"listen"`     // ":7863"
-	APIKey    string `json:"api_key"`    // 空 = 不鉴权
+	APIKey    string `json:"api_key"`    // 空 = 不鉴权；兼作 /admin/* 管理密钥
 	AuthDir   string `json:"auth_dir"`   // ./auths
 	StateFile string `json:"state_file"` // ./data/state.json
+	// KeysFile 多业务 Key 存储路径（keys.Store 热生效）。首次启动文件不存在时
+	// 把 api_key 迁移为 default 业务 Key；此后该文件为业务 Key 唯一权威源。
+	KeysFile string `json:"keys_file"` // ./data/keys.json
+
+	// MetricsFile 请求统计落盘路径（server.metrics_enabled=true 时生效）。
+	// 与 state_file 同目录风格，默认 ./data/metrics.json。
+	MetricsFile string `json:"metrics_file"`
 
 	Server struct {
 		// MaxBodyMB 聊天请求体大小上限（单位 MB，默认 8）。
@@ -26,6 +35,13 @@ type Config struct {
 		// （issue #41：截断的 JSON 让上游 unmarshal 报 unexpected EOF，网关却罚号）。
 		// 0/负数视为非法 → normalize 回落默认并记录。
 		MaxBodyMB int `json:"max_body_mb"`
+		// MetricsEnabled 请求统计开关（/v1/stats）。缺省 false：不记录观测，
+		// /v1/stats 返回 {"enabled":false,...}（面板据此显示未启用提示）。
+		// 控制面板提示的正是本键 server.metrics_enabled。
+		MetricsEnabled bool `json:"metrics_enabled"`
+		// AuthResyncSeconds auths 目录运行期自动发现的扫描间隔（秒）。缺省 30：
+		// 面板/脚本落盘新账号后无需重启网关。显式 0 = 关闭；负数回落默认。
+		AuthResyncSeconds int `json:"auth_resync_seconds"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -47,6 +63,12 @@ type Config struct {
 		// 也不路由，auth.Realm() 双保险的第一道闸）。纯 CN 部署行为不变：CN 账号
 		// 恒判 cn，global base 只在 realm=global 的账号上被使用。
 		Enabled bool `json:"enabled"`
+		// MixRealms 国际版/国内账号混合调度（缺省 false = 现状分池隔离）。
+		// true：选号不再按 realm 过滤，CN 与 global 账号在同一个关联/优先级体系内
+		// 竞争（配合 key 关联优先级即真正生效）；出站仍按**命中账号的 realm** 选
+		// base（CN 账号走 CN base、global 账号走 global base），模型名统一发裸名。
+		// 模型列表同步"统一化"：不再输出 global: 前缀，两域同名模型去重为一个名字。
+		MixRealms bool `json:"mix_realms"`
 		// ChatBase / BillingBase 国际版上游 base 覆盖；空 = 回落内置默认
 		// https://www.workbuddy.ai（D5，internal/upstream.defaultGlobalBase）。
 		ChatBase    string `json:"chat_base"`
@@ -125,11 +147,63 @@ type Config struct {
 		ExpiringSoon string `json:"expiring_soon"`
 	} `json:"pool"`
 
+	Automation struct {
+		// Enabled 是否由 automation 模块驱动定时循环。false = 回退 scheduler 原循环
+		// （kill switch：行为与引入前逐字一致）。手动触发/历史/状态 API 不受影响。
+		Enabled bool `json:"enabled"`
+		// HistoryFile 运行历史落盘路径（默认 ./data/automation.json）。
+		HistoryFile string `json:"history_file"`
+		// ScriptTimeout 脚本类任务（school/cat）子进程超时，默认 "10m"。
+		ScriptTimeout string `json:"script_timeout"`
+		// HistoryRuns 历史保留条数（ring），默认 100。
+		HistoryRuns int `json:"history_runs"`
+	} `json:"automation"`
+
 	SessionSticky struct {
 		Enabled    bool   `json:"enabled"`     // 默认 true
 		TTL        string `json:"ttl"`         // 会话绑定 TTL，默认 "30m"
 		GCInterval string `json:"gc_interval"` // 会话 GC 周期，默认 "5m"
 	} `json:"session_sticky"`
+
+	Anthropic struct {
+		// DefaultModel /v1/messages 上未知模型名（claude-sonnet-4-5 等）的缺省路由。
+		// 缺省 "cn:auto"（国内版自动档）；带 cn:/global: 前缀的请求名永远直通不经过本值。
+		DefaultModel string `json:"default_model"`
+		// ModelMap 精确映射：客户端模型名 → 网关模型名（含 cn:/global: 前缀）。
+		// 例：{"claude-sonnet-4-5": "cn:glm-5.3"}。未命中的名字走 DefaultModel。
+		ModelMap map[string]string `json:"model_map"`
+	} `json:"anthropic"`
+
+	// Notify 账号事件邮件提醒（额度即将耗尽 / 额度已耗尽 / 账号路由切换）。
+	// 配置为启动期加载：修改 SMTP 后需重启网关。
+	Notify struct {
+		Enabled bool `json:"enabled"`
+		// SMTP 连接
+		SMTPHost     string   `json:"smtp_host"`
+		SMTPPort     int      `json:"smtp_port"` // 缺省 587
+		SMTPUsername string   `json:"smtp_username"`
+		SMTPPassword string   `json:"smtp_password"`
+		SMTPFrom     string   `json:"smtp_from"`
+		SMTPTo       []string `json:"smtp_to"`
+		// SMTPTLS "starttls"（587，默认）/"tls"（465 隐式 TLS）/"none"（明文，仅内网中继）
+		SMTPTLS string `json:"smtp_tls"`
+		// CreditsThreshold 可用额度低于该值即告警（事件 A）
+		CreditsThreshold int64 `json:"credits_threshold"`
+		// ExpiringDays 存在快过期额度即告警（窗口语义与 pool.expiring_soon 对应）
+		ExpiringDays int `json:"expiring_days"`
+		// ThrottleHours 同一 (事件, 账号) 最小通知间隔（小时）
+		ThrottleHours int `json:"throttle_hours"`
+		// QueueSize 待发队列容量（满则丢弃）
+		QueueSize int `json:"queue_size"`
+		// ScanHours 额度扫描时刻（本地时区整点；空 = 不启用扫描任务，仅实时事件）
+		ScanHours []int `json:"scan_hours"`
+		// Events 事件开关（均缺省开启）
+		Events struct {
+			CreditsLow    *bool `json:"credits_low"`
+			Exhausted     *bool `json:"exhausted"`
+			AccountSwitch *bool `json:"account_switch"`
+		} `json:"events"`
+	} `json:"notify"`
 
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
@@ -139,19 +213,26 @@ type Config struct {
 	SessionTTL          time.Duration `json:"-"`
 	SessionGCInterval   time.Duration `json:"-"`
 	ExpiringSoonDur     time.Duration `json:"-"`
+	NotifyThrottleDur   time.Duration `json:"-"`
+	NotifyExpiringWin   time.Duration `json:"-"`
+	ScriptTimeoutDur    time.Duration `json:"-"`
 }
 
 // Default 默认配置。
 func Default() *Config {
 	c := &Config{
-		Listen:    ":7863",
-		APIKey:    "",
-		AuthDir:   "./auths",
-		StateFile: "./data/state.json",
+		Listen:      ":7863",
+		APIKey:      "",
+		AuthDir:     "./auths",
+		StateFile:   "./data/state.json",
+		KeysFile:    "./data/keys.json",
+		MetricsFile: "./data/metrics.json",
 	}
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.MaxBodyMB = 8 // 请求体上限默认 8MB
+	// auths 运行期自动发现缺省 30s（面板/脚本落盘新账号无需重启网关）。
+	c.Server.AuthResyncSeconds = 30
 	// 排程段默认值由 internal/config 集中维护（cmd/server 与 cmd/activity 共用，
 	// 消除 issue #49 的默认值漂移）。
 	c.Schedule = config.DefaultSchedule()
@@ -178,6 +259,23 @@ func Default() *Config {
 	c.SessionSticky.Enabled = true
 	c.SessionSticky.TTL = "30m"
 	c.SessionSticky.GCInterval = "5m"
+	// 自动化默认启用（定时循环由 automation 模块驱动；enabled=false 回退旧循环）。
+	c.Automation.Enabled = true
+	c.Automation.HistoryFile = "./data/automation.json"
+	c.Automation.ScriptTimeout = "10m"
+	c.Automation.HistoryRuns = 100
+	// Anthropic /v1/messages：未知模型名缺省路由到国内版自动档。
+	c.Anthropic.DefaultModel = "cn:auto"
+	// 通知缺省关闭（需填 SMTP 后显式开启）；阈值/节流/扫描时刻给缺省值，
+	// 便于面板把整段表单渲染出来。ScanHours 缺省跟随签到后一小时（9/21 → 10/22）。
+	c.Notify.Enabled = false
+	c.Notify.SMTPPort = 587
+	c.Notify.SMTPTLS = "starttls"
+	c.Notify.CreditsThreshold = 100
+	c.Notify.ExpiringDays = 7
+	c.Notify.ThrottleHours = 6
+	c.Notify.QueueSize = 256
+	c.Notify.ScanHours = []int{10, 22}
 	return c
 }
 
@@ -213,9 +311,38 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_STATE_FILE"); v != "" {
 		c.StateFile = v
 	}
+	if v := os.Getenv("WB2A_AUTOMATION_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Automation.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_AUTOMATION_HISTORY_FILE"); v != "" {
+		c.Automation.HistoryFile = v
+	}
+	if v := os.Getenv("WB2A_AUTOMATION_SCRIPT_TIMEOUT"); v != "" {
+		c.Automation.ScriptTimeout = v
+	}
+	if v := os.Getenv("WB2A_AUTOMATION_HISTORY_RUNS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Automation.HistoryRuns = n
+		}
+	}
+	if v := os.Getenv("WB2A_METRICS_FILE"); v != "" {
+		c.MetricsFile = v
+	}
+	if v := os.Getenv("WB2A_METRICS_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Server.MetricsEnabled = b
+		}
+	}
 	if v := os.Getenv("WB2A_MAX_BODY_MB"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Server.MaxBodyMB = n
+		}
+	}
+	if v := os.Getenv("WB2A_AUTH_RESYNC_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Server.AuthResyncSeconds = n
 		}
 	}
 	if v := os.Getenv("WB2A_SOFT_RATE"); v != "" {
@@ -267,6 +394,69 @@ func applyEnv(c *Config) {
 			c.Features.SanitizeBlacklistFingerprints = b
 		}
 	}
+	// 通知（邮箱提醒）env 覆盖
+	if v := os.Getenv("WB2A_NOTIFY_ENABLED"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Notify.Enabled = b
+		}
+	}
+	if v := os.Getenv("WB2A_SMTP_HOST"); v != "" {
+		c.Notify.SMTPHost = v
+	}
+	if v := os.Getenv("WB2A_SMTP_PORT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Notify.SMTPPort = n
+		}
+	}
+	if v := os.Getenv("WB2A_SMTP_USERNAME"); v != "" {
+		c.Notify.SMTPUsername = v
+	}
+	if v := os.Getenv("WB2A_SMTP_PASSWORD"); v != "" {
+		c.Notify.SMTPPassword = v
+	}
+	if v := os.Getenv("WB2A_SMTP_FROM"); v != "" {
+		c.Notify.SMTPFrom = v
+	}
+	if v := os.Getenv("WB2A_SMTP_TO"); v != "" {
+		var to []string
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				to = append(to, p)
+			}
+		}
+		if len(to) > 0 {
+			c.Notify.SMTPTo = to
+		}
+	}
+	if v := os.Getenv("WB2A_SMTP_TLS"); v != "" {
+		c.Notify.SMTPTLS = v
+	}
+	if v := os.Getenv("WB2A_NOTIFY_CREDITS_THRESHOLD"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			c.Notify.CreditsThreshold = n
+		}
+	}
+	if v := os.Getenv("WB2A_NOTIFY_EXPIRING_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Notify.ExpiringDays = n
+		}
+	}
+	if v := os.Getenv("WB2A_NOTIFY_THROTTLE_HOURS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Notify.ThrottleHours = n
+		}
+	}
+	if v := os.Getenv("WB2A_NOTIFY_SCAN_HOURS"); v != "" {
+		var hours []int
+		for _, p := range strings.Split(v, ",") {
+			if n, err := strconv.Atoi(strings.TrimSpace(p)); err == nil {
+				hours = append(hours, n)
+			}
+		}
+		if len(hours) > 0 {
+			c.Notify.ScanHours = hours
+		}
+	}
 	if v := os.Getenv("WB2A_PROMPT_MODE"); v != "" {
 		c.Prompt.Mode = v
 	}
@@ -276,6 +466,23 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_EXPIRING_SOON"); v != "" {
 		c.Pool.ExpiringSoon = v
 	}
+	if v := os.Getenv("WB2A_ANTHROPIC_DEFAULT_MODEL"); v != "" {
+		c.Anthropic.DefaultModel = v
+	}
+	if v := os.Getenv("WB2A_ANTHROPIC_MODEL_MAP"); v != "" {
+		// 形如 "claude-sonnet-4-5=cn:glm-5.3,claude-haiku-4-5=cn:auto"（逗号分隔 k=v，
+		// 覆盖 merge 进文件配置的 model_map）。非法片段跳过不报错（环境变量宜宽容）。
+		if c.Anthropic.ModelMap == nil {
+			c.Anthropic.ModelMap = map[string]string{}
+		}
+		for _, pair := range strings.Split(v, ",") {
+			k, val, found := strings.Cut(strings.TrimSpace(pair), "=")
+			if !found || strings.TrimSpace(k) == "" {
+				continue
+			}
+			c.Anthropic.ModelMap[strings.TrimSpace(k)] = strings.TrimSpace(val)
+		}
+	}
 }
 
 func (c *Config) normalize() error {
@@ -284,6 +491,35 @@ func (c *Config) normalize() error {
 	// 大请求又被静默 413——不如 fail fast 提示显式配大上限。
 	if c.Server.MaxBodyMB <= 0 {
 		return fmt.Errorf("server.max_body_mb: %d 非法（需为正整数，单位 MB）", c.Server.MaxBodyMB)
+	}
+	// metrics_file / keys_file 空（显式 "" 或存量 config.json 缺字段）回落默认；
+	// keys_file 为空会让 keys.Load 在空路径上落盘崩溃，必须兜底。
+	if c.MetricsFile == "" {
+		c.MetricsFile = "./data/metrics.json"
+	}
+	if c.KeysFile == "" {
+		c.KeysFile = "./data/keys.json"
+	}
+	// automation 段：空值回落默认（与 state_file/metrics_file/keys_file 同口径）。
+	if c.Automation.HistoryFile == "" {
+		c.Automation.HistoryFile = "./data/automation.json"
+	}
+	if c.Automation.ScriptTimeout == "" {
+		c.Automation.ScriptTimeout = "10m"
+	}
+	if c.ScriptTimeoutDur, err = time.ParseDuration(c.Automation.ScriptTimeout); err != nil {
+		return fmt.Errorf("automation.script_timeout: %w", err)
+	}
+	if c.Automation.HistoryRuns <= 0 {
+		c.Automation.HistoryRuns = 100
+	}
+	// anthropic.default_model 空回落 "cn:auto"（Default 已置；兜底显式 "" 场景）。
+	if c.Anthropic.DefaultModel == "" {
+		c.Anthropic.DefaultModel = "cn:auto"
+	}
+	// auths 自动发现间隔：负数回落默认 30s（显式 0 = 关闭，尊重用户选择）。
+	if c.Server.AuthResyncSeconds < 0 {
+		c.Server.AuthResyncSeconds = 30
 	}
 	if c.SoftRateDur, err = time.ParseDuration(c.Cooldown.SoftRate); err != nil {
 		return fmt.Errorf("cooldown.soft_rate: %w", err)
@@ -345,7 +581,74 @@ func (c *Config) normalize() error {
 	if err := c.Schedule.Normalize(); err != nil {
 		return err
 	}
+	// notify 段：映射为 notify.Config 并归一化校验（Enabled 但缺 SMTP 必需项 → 启动失败，
+	// 避免"配了却不通知"的静默失效）；同时把解析后的时长回填与校验扫描时刻。
+	nc, err := c.BuildNotifyConfig()
+	if err != nil {
+		return err
+	}
+	// 把归一化结果写回（面板/管理端读到的即生效值：非法端口、非法 tls 等已被纠正）。
+	c.Notify.SMTPPort = nc.Port
+	c.Notify.SMTPTLS = nc.TLSMode
+	c.Notify.CreditsThreshold = nc.CreditsThreshold
+	c.Notify.ExpiringDays = nc.ExpiringDays
+	c.Notify.ThrottleHours = int(nc.Throttle / time.Hour)
+	c.Notify.QueueSize = nc.QueueSize
+	c.NotifyThrottleDur = nc.Throttle
+	c.NotifyExpiringWin = time.Duration(nc.ExpiringDays) * 24 * time.Hour
+	c.Notify.ScanHours = normalizeScanHours(c.Notify.ScanHours)
 	return c.normalizePrompt()
+}
+
+// BuildNotifyConfig 把 config.json 的 notify 段映射为 notify.Config 并归一化。
+func (c *Config) BuildNotifyConfig() (notify.Config, error) {
+	nc := notify.Config{
+		Enabled:          c.Notify.Enabled,
+		Host:             c.Notify.SMTPHost,
+		Port:             c.Notify.SMTPPort,
+		Username:         c.Notify.SMTPUsername,
+		Password:         c.Notify.SMTPPassword,
+		From:             c.Notify.SMTPFrom,
+		To:               c.Notify.SMTPTo,
+		TLSMode:          c.Notify.SMTPTLS,
+		CreditsThreshold: c.Notify.CreditsThreshold,
+		ExpiringDays:     c.Notify.ExpiringDays,
+		Throttle:         time.Duration(c.Notify.ThrottleHours) * time.Hour,
+		QueueSize:        c.Notify.QueueSize,
+		Events: notify.Events{
+			// 三字段用 *bool：nil = 未配置（缺省开），显式 false = 关。
+			CreditsLow:    boolOrTrue(c.Notify.Events.CreditsLow),
+			Exhausted:     boolOrTrue(c.Notify.Events.Exhausted),
+			AccountSwitch: boolOrTrue(c.Notify.Events.AccountSwitch),
+		},
+	}
+	if err := nc.Normalize(); err != nil {
+		return nc, err
+	}
+	return nc, nil
+}
+
+// boolOrTrue nil → true，否则取显式值。
+func boolOrTrue(p *bool) bool {
+	if p == nil {
+		return true
+	}
+	return *p
+}
+
+// normalizeScanHours 去重、排序并剔除越界时刻（0-23）；空 = 不启用扫描任务。
+func normalizeScanHours(in []int) []int {
+	seen := map[int]bool{}
+	out := make([]int, 0, len(in))
+	for _, h := range in {
+		if h < 0 || h > 23 || seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // normalizePrompt 校验 prompt.mode 并按 file 加载提示词文本（custom 模式）。

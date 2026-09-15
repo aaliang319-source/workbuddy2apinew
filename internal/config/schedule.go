@@ -105,25 +105,27 @@ func (s *Schedule) Normalize() error {
 // 实际可能被当成另一个整点照常执行；这里直接快速失败，并在错误信息里指向正确的开关
 // （checkin_enabled / keepalive_enabled），避免用户靠猜哨兵值来配。
 func (s *Schedule) validateHours() error {
-	if err := checkHourRange("schedule.checkin_hours", "checkin_enabled", s.CheckinHours); err != nil {
+	if err := CheckHourRange("schedule.checkin_hours", "checkin_enabled", s.CheckinHours); err != nil {
 		return err
 	}
-	if err := checkHourRange("schedule.travel_hours", "travel_enabled", s.TravelHours); err != nil {
+	if err := CheckHourRange("schedule.travel_hours", "travel_enabled", s.TravelHours); err != nil {
 		return err
 	}
-	if err := checkHourRange("schedule.activity_hours", "activity_enabled", s.ActivityHours); err != nil {
+	if err := CheckHourRange("schedule.activity_hours", "activity_enabled", s.ActivityHours); err != nil {
 		return err
 	}
-	if err := checkHourRange("schedule.keepalive_hours", "keepalive_enabled", s.KeepaliveHours); err != nil {
+	if err := CheckHourRange("schedule.keepalive_hours", "keepalive_enabled", s.KeepaliveHours); err != nil {
 		return err
 	}
-	if err := checkHourRange("schedule.school_hours", "school_enabled", s.SchoolHours); err != nil {
+	if err := CheckHourRange("schedule.school_hours", "school_enabled", s.SchoolHours); err != nil {
 		return err
 	}
-	return checkHourRange("schedule.cat_hours", "cat_enabled", s.CatHours)
+	return CheckHourRange("schedule.cat_hours", "cat_enabled", s.CatHours)
 }
 
-func checkHourRange(field, switchKey string, hours []int) error {
+// CheckHourRange 校验小时是否落在 0-23（导出给 internal/automation 的 /apply 复用，
+// 保证定时配置的校验语义在启动路径与热更新路径完全一致）。
+func CheckHourRange(field, switchKey string, hours []int) error {
 	for _, h := range hours {
 		if h < 0 || h > 23 {
 			return fmt.Errorf("%s: %d 不是合法小时（0-23）；如要关闭该任务请设 schedule.%s=false", field, h, switchKey)

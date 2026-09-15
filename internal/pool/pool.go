@@ -43,6 +43,10 @@ type Pool struct {
 	stopCh chan struct{}
 	// closeOnce 保证 Close 幂等（多次调用不重复 close channel）。
 	closeOnce sync.Once
+	// notifier 通知回调（SetNotifier 注入；nil = 关闭）。契约见 notice.go：持锁路径上必须非阻塞。
+	notifier NotifierFn
+	// availability "某 realm 当前可用账号"查询（SetAvailability 注入；nil = 不提供）。
+	availability func(realm string) []string
 }
 
 // New 构建池；stateFp 非空时尝试加载旧状态，并启动后台周期性落盘 goroutine。
@@ -175,6 +179,27 @@ func (p *Pool) Add(a *auth.Auth) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.upsertLocked(a)
+}
+
+// AddMissing 仅追加池中不存在的账号（运行期自动发现专用）：既有账号一律跳过。
+// 与 SyncToDir（全量对齐，含删除）的分工：
+//   - 不覆盖既有凭证：token 刷新后内存与磁盘同源（RefreshToken→SaveAtomic），
+//     但 SaveAtomic 失败时内存更新，覆盖会造成凭证降级；
+//   - 不删除消失账号：文件临时缺失/编辑器原子写瞬间不应把在途账号踢出池，
+//     删除语义仍由重启时 SyncToDir 全量对齐承担。
+// 返回新增数量（调用方据此打日志/告警）。
+func (p *Pool) AddMissing(auths []*auth.Auth) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	added := 0
+	for _, a := range auths {
+		if _, ok := p.byUID[a.UID]; ok {
+			continue
+		}
+		p.byUID[a.UID] = &entry{a: a}
+		added++
+	}
+	return added
 }
 
 // SyncToDir 用最新扫描结果对齐池：新账号加入、消失的账号剔除（状态保留）。

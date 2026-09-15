@@ -128,6 +128,31 @@ func TestChatStatsReaderCreditNoUsage(t *testing.T) {
 	}
 }
 
+// TestChatStatsReaderCacheParsed：usage 带 prompt_cache_* 三元组 → Cache() 原样取出。
+func TestChatStatsReaderCacheParsed(t *testing.T) {
+	sse := "data: {\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":5," +
+		"\"prompt_cache_hit_tokens\":80,\"prompt_cache_miss_tokens\":15,\"prompt_cache_write_tokens\":5}}\n\n" +
+		"data: [DONE]\n\n"
+	r := newChatStatsReaderSince(strings.NewReader(sse), time.Now())
+	_, _ = io.Copy(io.Discard, r)
+	hit, miss, write, ok := r.Cache()
+	if !ok || hit != 80 || miss != 15 || write != 5 {
+		t.Errorf("Cache()=(%d,%d,%d,%v) want (80,15,5,true)", hit, miss, write, ok)
+	}
+}
+
+// TestChatStatsReaderCacheMissing：usage 无任何 cache 字段 → Cache() ok=false
+// （缺失≠全 0，统计侧据此区分"上游没开缓存观测"与"命中为 0"）。
+func TestChatStatsReaderCacheMissing(t *testing.T) {
+	sse := "data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"credit\":0.2}}\n\n" +
+		"data: [DONE]\n\n"
+	r := newChatStatsReaderSince(strings.NewReader(sse), time.Now())
+	_, _ = io.Copy(io.Discard, r)
+	if _, _, _, ok := r.Cache(); ok {
+		t.Error("无 cache 字段 Cache() 应 ok=false")
+	}
+}
+
 func TestChatStatsReaderTTFBOnlyOnDataFrame(t *testing.T) {
 	start := time.Now().Add(-2 * time.Second)
 	var s chatStatsReader

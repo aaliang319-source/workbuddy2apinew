@@ -55,6 +55,15 @@ func (p *Pool) Cooldown(uid string, kind CoolKind, d time.Duration, reason strin
 		// （否则换模型请求会错误绕过本次冷却）。
 		e.modelCooldowns = nil
 		p.dirty.Store(true)
+		// 通知：账号退出服务（流量转移）。CoolHard（余额耗尽）单独归类为 exhausted。
+		evKind := "cooling"
+		if kind == CoolHard {
+			evKind = "exhausted"
+		}
+		p.notifyLocked(NoticeEvent{
+			Kind: evKind, UID: uid, Nickname: e.a.Nickname, Realm: e.a.Realm(),
+			Reason: reason, Credits: e.credits, Expiring: e.creditsExpiring, Until: e.until,
+		})
 	}
 }
 
@@ -205,6 +214,11 @@ func (p *Pool) CooldownSoftRate(uid string, base time.Duration, resetAt time.Tim
 		e.reason = reason
 		e.modelCooldowns = nil // 账号级软冷却：清空模型豁免（切模型不绕过）
 		p.dirty.Store(true)
+		// 通知：账号进入账号级软冷却（限流），流量转移。
+		p.notifyLocked(NoticeEvent{
+			Kind: "cooling", UID: uid, Nickname: e.a.Nickname, Realm: e.a.Realm(),
+			Reason: reason, Credits: e.credits, Expiring: e.creditsExpiring, Until: e.until,
+		})
 	}
 }
 
@@ -274,6 +288,11 @@ func (p *Pool) recordBreakerFailureLocked(e *entry) {
 	e.fails = 0
 	e.retryCount++
 	e.breakerUntil = time.Now().Add(d)
+	// 通知：熔断（连续失败），账号退出服务。
+	p.notifyLocked(NoticeEvent{
+		Kind: "breaker", UID: e.a.UID, Nickname: e.a.Nickname, Realm: e.a.Realm(),
+		Reason: "连续失败熔断", Credits: e.credits, Expiring: e.creditsExpiring, Until: e.breakerUntil,
+	})
 }
 
 // CooldownUntilTomorrow4AM 冷却到下一个 04:00（本地时区）。

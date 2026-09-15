@@ -387,6 +387,7 @@ func (p *Pool) statusOf(uid string, e *entry) Status {
 		Realm:             e.a.Realm(),
 		Nickname:          e.a.Nickname,
 		Credits:           e.credits,
+		CreditsExpiring:   e.creditsExpiring,
 		Cooling:           now.Before(e.until) || now.Before(e.breakerUntil),
 		Reason:            reason,
 		Disabled:          e.disabled,

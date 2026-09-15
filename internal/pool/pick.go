@@ -63,8 +63,16 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	if len(cands) == 0 {
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLocked(tried, now, realm)
+		return p.pickEarliestExpiryLocked(tried, now, realm, nil)
 	}
+	return p.pickFromLocked(cands, reqModel, now)
+}
+
+// pickFromLocked 从候选集（已过 healthy/realm/tried/在途过滤）中完成选号：
+// 成本分层（优先免费）→ 三因子权重 top5 短名单 → 短名单内加权随机 →
+// 防并发撞号过滤 → LRU 兜底，并记录 lastUsed/usedSeq。
+// pick 与 PickForKey（Key 关联分层选号）共用；调用方须已持 p.mu 写锁。
+func (p *Pool) pickFromLocked(cands []*entry, reqModel string, now time.Time) *auth.Auth {
 	// top5 短名单按三因子权重降序截断（而非 credits 单纯降序）：否则闲置补偿 + 成功率
 	// 根本进不了短名单决策，低 credits 但高成功率/久置的账号会永远排不进 top5。
 	var maxCredits int64
@@ -185,11 +193,17 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 // 分级：disabled 永不参与；CoolHard（余额耗尽，等签到的号）同样排除——调了必 402，浪费轮换并产生噪音日志；
 // CoolSoft 与熔断号允许参与（可能已恢复，失败成本仅一轮换）。
 // 被 tried 排除、在途占满的账号同样跳过（维持请求级轮换 + 租约语义）。无任何可用返回 nil。
-func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm string) *auth.Auth {
+// scope 非空时叠加 Key 关联过滤：仅 scope.Allowed 内的账号参与兜底（PickForKey 用）。
+func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm string, scope *KeyScope) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
 			continue
+		}
+		if scope != nil {
+			if _, ok := scope.Allowed[uid]; !ok {
+				continue // Key 关联过滤：scope 外账号永不兜底
+			}
 		}
 		if realm != "" && e.a.Realm() != realm {
 			continue // 域过滤：池内跨 realm 的冷却账号不参与本 realm 兜底

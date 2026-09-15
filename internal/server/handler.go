@@ -2,6 +2,7 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -15,7 +16,10 @@ import (
 	"time"
 
 	"workbuddy2api/internal/auth"
+	"workbuddy2api/internal/automation"
+	"workbuddy2api/internal/keys"
 	"workbuddy2api/internal/logfmt"
+	"workbuddy2api/internal/metrics"
 	"workbuddy2api/internal/pool"
 	"workbuddy2api/internal/prompt"
 	"workbuddy2api/internal/session"
@@ -24,15 +28,26 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	APIKey    string // 空 = 不鉴权
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	Pool     *pool.Pool
+	Upstream *upstream.Client
+	APIKey   string // 空 = 不鉴权；兼作 /admin/* 管理端鉴权密钥
+	// Keys 多业务 Key 存储（nil = 旧单 Key 模式，行为零变化）。
+	// 多 Key 模式下业务请求凭据必须在 keys.json 中且启用；APIKey 仅作管理端密钥。
+	Keys *keys.Store
+	// AdminKey /admin/* 管理端鉴权密钥（main 注入 cfg.APIKey）；空回落 APIKey。
+	AdminKey  string
+	MaxRotate int // 单请求最多换号次数，默认 3
 	// MaxBodyBytes 聊天请求体大小上限；<=0 兜底 8<<20（8MB）。
 	// 超限直接 413 request_body_too_large（不再静默截断喂给上游，issue #41）。
 	MaxBodyBytes int64
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
+	// Automation 定时自动化管理器（/admin/automation/*）；nil = 不注册该组路由。
+	Automation *automation.Manager
+
+	// Metrics 请求统计累计器（/v1/stats）；nil = 统计关闭
+	// （server.metrics_enabled=false）：不记录观测，端点返回 enabled=false。
+	Metrics *metrics.Tracker
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
 	StickyCount func() int
 	// RedisMode 观测字段（"upstash" / "noop"），供 /status 透出。
@@ -50,6 +65,22 @@ type Config struct {
 	// false（显式逃生门）时即便 auth realm=global 也不提供 global: 模型名
 	// （modelList 不列 global 名单）。
 	GlobalEnabled bool
+
+	// MixRealms 国内/国际账号混合调度（config global.mix_realms）。
+	// true：选号不按 realm 过滤（CN 与 global 账号同池竞争，Key 关联优先级跨域生效）；
+	// 出站 base 仍按命中账号的 realm 选择，模型名统一发裸名；/v1/models 输出统一
+	// 模型名（去 global: 前缀、同名去重）。
+	MixRealms bool
+
+	// Anthropic /v1/messages 端点的模型映射（config anthropic 段）：
+	//   - DefaultModel：claude-* 等未知模型名的缺省路由（缺省 "cn:auto"）；
+	//   - ModelMap：精确映射（claude-sonnet-4-5 → cn:glm-5.3 之类）。
+	// AnthropicDefaultModel string
+	AnthropicDefaultModel string
+	AnthropicModelMap     map[string]string
+
+	// NotifyTest 发送一封通知测试邮件（nil = 通知未启用 → /admin/notify/test 返回 400）。
+	NotifyTest func() error
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -89,9 +120,25 @@ func NewHandler(cfg Config) *Handler {
 	}
 	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// Anthropic 兼容端点（claude-code 等）：/v1/messages 主端点 + count_tokens 计数器。
+	h.mux.HandleFunc("POST /v1/messages", h.withAuth(h.messages))
+	h.mux.HandleFunc("POST /v1/messages/count_tokens", h.withAuth(h.countTokens))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
+	h.mux.HandleFunc("GET /v1/stats", h.withAuth(h.stats))
+	h.mux.HandleFunc("POST /v1/stats/reset", h.withAuth(h.statsReset))
+	// OpenAI Responses API（Codex CLI 默认协议）；无 /v1 前缀别名同注册，
+	// 兼容 base_url 未带 /v1 的客户端写法。
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
+	h.mux.HandleFunc("POST /responses", h.withAuth(h.responses))
+	// 无 /v1 前缀别名（DeepSeek 官方 API 双路径兼容）：dsh 的 DeepSeek 直连适配器
+	// 按 `${baseURL}/chat/completions` 拼 URL（llm-deepseek adapter.ts:329），base
+	// 不带 /v1 时会打到裸路径——真实 DeepSeek API 两条路径都收，网关对齐该行为。
+	h.mux.HandleFunc("POST /chat/completions", h.withAuth(h.chatCompletions))
+	h.mux.HandleFunc("GET /models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /healthz", h.healthz)
+	h.registerAdmin()
+	h.registerAutomation()
 	return h
 }
 
@@ -99,18 +146,102 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
 }
 
+// keyCtx 请求上下文携带的业务 Key（多 Key 模式下由 withAuth 注入）。
+type keyCtx struct{}
+
+// handlerKey 取出 withAuth 注入的业务 Key；未启用多 Key 模式时返回 nil。
+func handlerKey(r *http.Request) *keys.Key {
+	k, _ := r.Context().Value(keyCtx{}).(*keys.Key)
+	return k
+}
+
+// adminKey 管理端密钥（AdminKey 空回落 APIKey）。
+func (h *Handler) adminKey() string {
+	if h.cfg.AdminKey != "" {
+		return h.cfg.AdminKey
+	}
+	return h.cfg.APIKey
+}
+
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if h.cfg.APIKey != "" {
-			authz := r.Header.Get("Authorization")
-			// 常量时间比较（发现 7）：!= 短路时序随前缀长度变化，公网暴露下
-			// 理论上可逐字节探测 key 前缀；ConstantTimeCompare 消除该信号。
-			provided := strings.TrimPrefix(authz, "Bearer ")
-			if !strings.HasPrefix(authz, "Bearer ") ||
-				subtle.ConstantTimeCompare([]byte(provided), []byte(h.cfg.APIKey)) != 1 {
+		// /admin/* 管理端：独立鉴权（仅管理密钥；业务 Key 不可访问管理端）。
+		if strings.HasPrefix(r.URL.Path, "/admin/") {
+			h.withAdminAuth(next)(w, r)
+			return
+		}
+		// 双头鉴权：OpenAI 客户端走 Authorization: Bearer，Anthropic 客户端
+		// （Claude Code 等）走 x-api-key。Bearer 优先，未命中再回落 x-api-key；
+		// 两条路径都走常量时间比较（避免时序侧信道）。
+		// 注意：bearer/xkey 各自保留原值——回落比较不得覆盖 bearer（多 Key 模式
+		// 需按客户端携带的原始凭据查 keys 存储，发现：bearer 与管理密钥不同但
+		// 本身是合法业务 Key 时，覆盖会导致查找落空 401）。
+		var bearer, xkey string
+		if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
+			bearer = strings.TrimPrefix(authz, "Bearer ")
+		}
+		xkey = r.Header.Get("X-Api-Key")
+		secret := h.cfg.APIKey
+		ok := subtle.ConstantTimeCompare([]byte(bearer), []byte(secret)) == 1
+		if !ok {
+			ok = subtle.ConstantTimeCompare([]byte(xkey), []byte(secret)) == 1
+		}
+		if h.cfg.Keys != nil {
+			// 多 Key 模式：凭据必须在 keys.json 中且启用（legacy api_key 首启已
+			// 迁移为 default Key，无需旁路）。禁用/未关联的 Key 明确报错。
+			// 凭据查找与旧双头回落语义一致：Bearer 优先，未命中再 x-api-key。
+			k, found := h.cfg.Keys.Lookup(bearer)
+			if !found {
+				k, found = h.cfg.Keys.Lookup(xkey)
+			}
+			if !found {
 				writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 				return
 			}
+			if !k.Enabled {
+				writeOpenAIError(w, http.StatusUnauthorized, "key_disabled", "api key is disabled")
+				return
+			}
+			// 未关联任何账号的 Key：仅迁移而来的通配 Key（Wildcard，即 legacy
+			// default）可继续用全池（与池层 PickForKey 空 scope 语义一致）；
+			// 其余 Key 一律 403 key_not_provisioned——必须先关联账号（用户需求）。
+			if len(h.cfg.Keys.AllowedUIDs(k.ID)) == 0 && !k.Wildcard {
+				writeOpenAIError(w, http.StatusForbidden, "key_not_provisioned", "api key has no associated accounts")
+				return
+			}
+			next(w, r.WithContext(context.WithValue(r.Context(), keyCtx{}, k)))
+			return
+		}
+		// 旧单 Key 模式（Keys 未注入）：空密钥 = 不鉴权。
+		if h.cfg.APIKey != "" && !ok {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// withAdminAuth 管理端鉴权：仅接受管理密钥（AdminKey/APIKey）。
+func (h *Handler) withAdminAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		admin := h.adminKey()
+		if admin == "" {
+			// 未配置管理密钥：管理端整体关闭（404 避免暴露端点存在性）。
+			writeOpenAIError(w, http.StatusNotFound, "not_found", "not found")
+			return
+		}
+		var provided string
+		if authz := r.Header.Get("Authorization"); strings.HasPrefix(authz, "Bearer ") {
+			provided = strings.TrimPrefix(authz, "Bearer ")
+		}
+		ok := subtle.ConstantTimeCompare([]byte(provided), []byte(admin)) == 1
+		if !ok {
+			provided = r.Header.Get("X-Api-Key")
+			ok = subtle.ConstantTimeCompare([]byte(provided), []byte(admin)) == 1
+		}
+		if !ok {
+			writeOpenAIError(w, http.StatusUnauthorized, "invalid_admin_key", "missing or invalid admin key")
+			return
 		}
 		next(w, r)
 	}
@@ -226,12 +357,15 @@ var globalModels = upstream.GlobalModelNames
 // modelList 动态获取模型列表并包装成 OpenAI 格式（含 context_length）。
 // CN 模型输出统一加 "cn:" 前缀（gateway 路由协议，与 resolveModel 对称）。
 // 动态失败回退静态表；global.enabled=false（显式逃生门）时只列 CN（global 名单不出现）。
+// mix_realms=true 时输出"统一模型名"：CN 与 global 同名模型合并为一个裸名（去前缀、
+// 按裸名去重，先 CN 后 global 顺序），客户端只需一套名字即可命中两域账号。
 func (h *Handler) modelList() []map[string]any {
+	mix := h.cfg.MixRealms
 	out := make([]map[string]any, 0, len(staticModels)+len(globalModels))
 	if infos := h.fetchDynamicModels(); len(infos) > 0 {
 		for _, mi := range infos {
 			entry := map[string]any{
-				"id":                "cn:" + mi.ID,
+				"id":                cnPrefix(mix) + mi.ID,
 				"object":            "model",
 				"created":           1753600000,
 				"owned_by":          "workbuddy",
@@ -261,7 +395,7 @@ func (h *Handler) modelList() []map[string]any {
 				e[k] = v
 			}
 			if id, ok := m["id"].(string); ok {
-				e["id"] = "cn:" + id
+				e["id"] = cnPrefix(mix) + id
 				// P0：静态兜底分支同样按 CN 静态档位表透出 effort 能力（远端不可用时的可发现性）。
 				if efforts, def := upstream.EffortListing("cn", id, nil, ""); efforts != nil {
 					e["reasoning_supported_efforts"] = efforts
@@ -276,14 +410,26 @@ func (h *Handler) modelList() []map[string]any {
 	// global 模型名单：仅 GlobalEnabled=true 时列出（逃生门）。
 	// 名单 = 探测结果 ∪ §7.2 静态（fetchGlobalModels 内合并去重）；无 global 账号时
 	// 直接静态名单且零上游调用。
+	// mix_realms=true 时只补 CN 名单里没有的名字（裸名），同名以 CN 条目为准。
 	if h.cfg.GlobalEnabled {
 		// global 域 effort 能力三级查找：探测下发桶（权威）→ 静态兜底表 → 省略。
 		// 先 fetchGlobalModels（内部探测并落 effort 桶），再按 id 取快照。
 		globalIDs := h.fetchGlobalModels()
 		globalEfforts, globalDefaults := h.cfg.Upstream.GlobalEffortSnapshot()
+		seen := map[string]bool{}
+		if mix {
+			for _, e := range out {
+				if id, ok := e["id"].(string); ok {
+					seen[id] = true
+				}
+			}
+		}
 		for _, id := range globalIDs {
+			if mix && seen[id] {
+				continue // 两域同名：统一为一个名字（保留 CN 条目元数据）
+			}
 			entry := map[string]any{
-				"id":             "global:" + id,
+				"id":             globalPrefix(mix) + id,
 				"object":         "model",
 				"created":        1753600000,
 				"owned_by":       "workbuddy",
@@ -299,6 +445,22 @@ func (h *Handler) modelList() []map[string]any {
 		}
 	}
 	return out
+}
+
+// cnPrefix 模型名前缀：默认 "cn:"（分池路由协议）；混合调度时输出裸名。
+func cnPrefix(mix bool) string {
+	if mix {
+		return ""
+	}
+	return "cn:"
+}
+
+// globalPrefix 国际模型名前缀：默认 "global:"；混合调度时输出裸名（与 CN 统一）。
+func globalPrefix(mix bool) string {
+	if mix {
+		return ""
+	}
+	return "global:"
 }
 
 // fetchGlobalModels 返回 global 模型名单（探测 ∪ 静态 overlay，去重）。
@@ -411,10 +573,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// bareModel 用于选号/粘性/账本/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
 	realm, bareModel := resolveModel(peek.Model)
+	// 混合调度（config global.mix_realms）：选号不按 realm 过滤——CN 与 global 账号
+	// 在同一 Key 关联/优先级体系内竞争；出站 base 仍随命中账号的 realm 走。
+	pickRealm := realm
+	if h.cfg.MixRealms {
+		pickRealm = ""
+	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
 	st := newChatStat(time.Now(), body, peek.Stream)
+	st.proto = "openai" // 单条明细协议来源
 	defer st.done()
+	// /v1/stats 观测：出口统一上报一次（后注册先执行；旋转循环整体只记 1 次，
+	// 口径是"请求级"而非"尝试级"——最终 st.status 定 success/failed）。
+	defer h.observeMetrics(st, bareModel, peek.Stream)
 
 	tried := map[string]bool{}
 	var lastErr error
@@ -519,23 +691,45 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
+	// Key 关联范围：多 Key 模式下选号限定在该 Key 关联（且启用）的账号子集内，
+	// 并按关联优先级分层（PickForKey：先耗尽最高层再降层）；nil = 旧单 Key 模式全池。
+	var keyScope *pool.KeyScope
+	if k := handlerKey(r); k != nil {
+		keyScope = &pool.KeyScope{Allowed: h.cfg.Keys.AllowedUIDs(k.ID)}
+		st.keyName = k.Name // 单条明细：业务 Key 名
+	}
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
+		// 粘性号不在本 Key 关联集内（他 Key 绑定/关联已变更）时先解绑，避免跨 Key 泄漏流量。
+		if stickyUID != "" && keyScope != nil {
+			if _, allowed := keyScope.Allowed[stickyUID]; !allowed {
+				unbindSticky()
+			}
+		}
 		var acct *auth.Auth
 		if stickyUID != "" {
-			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
-			if acct == nil || (realm != "" && acct.Realm() != realm) {
-				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑。
+			// Scoped 版：Key 关联外或存在更高优先层可用号时返回 nil → 解绑重选
+			//（优先级高于粘性，避免会话永久钉在低优先层）。
+			acct = h.cfg.Pool.PickByUIDForModelScoped(stickyUID, bareModel, pickRealm, keyScope)
+			if acct == nil || (pickRealm != "" && acct.Realm() != pickRealm) {
+				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）、realm 不符，
+				// 或本 Key 存在更高优先层可用号 → 解绑。
 				unbindSticky()
 			}
 		}
 		if acct == nil {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
-			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			// （healthyForModel），realm 谓词过滤跨域账号（mix_realms 时 pickRealm=""，
+			// 跨域混选）；keyScope 叠加 Key 关联分层。
+			acct = h.cfg.Pool.PickForKey(tried, bareModel, pickRealm, keyScope)
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
+			// 明细失败原因：仅当此前没有更具体的失败分类时才填兜底值
+			//（先撞 hard_credit 再无号可用，记 hard_credit 对用户更有信息量）。
+			if st.errMsg == "" {
+				st.errMsg = "no_account_available(503)"
+			}
 			break
 		}
 		st.uid = acct.UID
@@ -551,11 +745,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			continue // 最后一个名额被并发抢走 → 换号
 		}
 		heldUID = acct.UID
+		st.tries++ // 真正出站的尝试计数（明细换号次数维度）
 
 		// token 临近过期 → 先 refresh（失败冷却换号）
 		if acct.NeedsRefresh(h.cfg.RefreshSkew) {
 			if err := h.cfg.Upstream.RefreshToken(acct); err != nil {
 				lastErr = err
+				st.errMsg = "token_refresh_failed"
 				var ue *upstream.Error
 				if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead {
 					// 12153 一次失败不杀号（临时触发会误杀）：与 scheduler keepalive/checkin
@@ -588,12 +784,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 上游 client 已打 transport error 日志。
 			st.status = http.StatusServiceUnavailable
 			lastErr = terr
+			st.errMsg = "transport_error(503)"
 			fail(acct.UID)
 			continue
 		}
 		if status >= 400 {
 			st.status = status
 			kind := upstream.Classify(status, string(respBody))
+			// 单条请求明细失败原因：只记权威分类 + 状态码，不记上游原始 Msg
+			//（可能携带账号 UID 与内部错误码，见下方尾部注释）。
+			st.errMsg = fmt.Sprintf("%s(%d)", kind, status)
 			// 内容拦截误报（passthrough 模式首遇）：判定为 system 指纹误报，
 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试。
 			// 第二次仍被拦（用户内容本身触发审核）→ 回内容防火墙错误（见下分支）。
@@ -612,7 +812,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				// （此前会落到 503 no_healthy_account + lastErr 泄露 11128 与账号语义）。
 				// 不罚账号（ErrContentBlocked 分支无冷却/熔断/NoteError），但 content_blocked
 				// 是本请求的终态——换任何账号都会撞同一审核，轮转纯属浪费时间。
-				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel)
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, status)
 				fail(acct.UID)
 				msg := upstream.ContentBlockedClientMessage(string(respBody))
 				writeOpenAIError(w, http.StatusBadRequest, "content_blocked", msg)
@@ -620,11 +820,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
-			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel)
+			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, status)
 			fail(acct.UID)
 			continue
 		}
 		h.cfg.Pool.NoteSuccess(acct.UID)
+		st.errMsg = "" // 轮转成功：清掉此前失败尝试的分类（成功请求明细不留失败痕迹）
 		// 11102 负缓存清命：该账号该模型实测成功，立即解除避让（不必等 TTL 到期）。
 		// BlockModelClear 按 "11102" reason 前缀识别，只清 11102 条目、不碰 6004 独立冷却。
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
@@ -640,9 +841,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			_ = upstream.Stream(w, stats)
 			st.ttfb = stats.TTFB()
 			st.toks, _ = stats.Tokens()
+			if m := stats.Model(); m != "" {
+				st.respModel = m // 上游回传的实际模型（auto 档路由结果，进明细）
+			}
+			// metrics 载荷：prompt/cache/credit 供出口 observeMetrics 上报。
+			if p, ok := stats.PromptTokens(); ok {
+				st.mPrompt = int64(p)
+			}
+			st.mHit, st.mMiss, st.mWrite, st.mHasCache = stats.Cache()
 			// 成本账本：末帧 usage 带 credit 与 token 总数时记录实测单价，
 			// 供下次选号把免费/便宜的号排在前面。
-			if credit, ok := stats.Credit(); ok {
+			credit, creditOK := stats.Credit()
+			if creditOK {
+				st.mCredit, st.mCreditOK = credit, true
 				h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, stats.TotalTokens())
 			} else if _, hasUsage := stats.Tokens(); hasUsage {
 				// R9(c) 防护观测：usage 存在但 credit 缺失（如 global SSE 末帧未带 credit）。
@@ -658,13 +869,24 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
+			st.errMsg = "upstream_parse(502)"
 			return
+		}
+		// 实际模型：Aggregate 输出里取上游回传的 model（auto 档路由结果，进明细）。
+		if m, ok := resp["model"].(string); ok && m != "" && st.respModel == "" {
+			st.respModel = m
 		}
 		writeJSON(w, http.StatusOK, resp)
 		st.status = http.StatusOK
 		st.toks = completionTokens(resp)
+		// metrics 载荷（非流式）：prompt/cache/credit 供出口 observeMetrics 上报。
+		if p, ok := usagePromptTokens(resp); ok {
+			st.mPrompt = p
+		}
+		st.mHit, st.mMiss, st.mWrite, st.mHasCache = usageCacheTokens(resp)
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if credit, total, ok := usageCreditTotal(resp); ok {
+			st.mCredit, st.mCreditOK = credit, true
 			h.cfg.Pool.NoteModelCost(acct.UID, bareModel, credit, total)
 		}
 		return
@@ -717,14 +939,20 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 //     达到 breakerThreshold 触发熔断（指数退避）。
 //   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11102 负缓存避让（复用 modelCooldowns
 //     机制，Until=指数退避 TTL，选号侧 healthyForModel 避开，切模型即可用）。
-//   - 其他（default：ErrClient/ErrNone）→ 只换号不罚（防雪崩），不喂熔断。
+//   - upstream 403（归入 ErrClient，如 global 上游 WAF 拦截页）→ 同样 BlockModelBackoff
+//     负缓存避让：混合调度下高优先级账号若持续被 403 拒绝，"只换号不罚"会让每条请求
+//     都先撞一次它（实测 tries=2、明细错误 client(403)）。按 (账号, 模型) 记 6h 起指数
+//     退避、半开重试；该账号的其他模型不受影响。
+//   - 其他（default：ErrNone）→ 只换号不罚（防雪崩），不喂熔断。
+//
+// status 上游 HTTP 状态码：ErrClient 内部据此区分 403 与其他 4xx。
 //
 // body 仅在 ErrSoftRate 分支用于识别上游 6004 模型级限流并解析重置时间；model 为请求
 // 携带的模型名（触发 6004 时记录以便后续切模型豁免）。
 //
 // 恢复出口：CoolSoft/CoolHard 各自到期自动恢复；熔断按其指数退避截止到期；
 // 成功（NoteSuccess）清 fails/熔断；签到解冻（ReenableIfCredits→reviveCoolingLocked）只清冷却，不动熔断。
-func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string) {
+func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, model string, status int) {
 	switch kind {
 	case upstream.ErrHardCredit:
 		// 402 + 余额关键词即积分耗尽：同步冷却到次日 04:00（签到任务 09/21 点恢复），
@@ -789,6 +1017,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.BlockModelBackoff(uid, model, upstream.ModelBlockReason)
 	default:
 		// 其余（ErrClient/ErrNone）：只换号不罚（防雪崩），不喂熔断。
+		// 例外：upstream 403（WAF 拦截页/权限拒绝）→ (账号, 模型) 负缓存避让。
+		// 不避让的后果：混合调度下高优先级账号被 403 后仍恒居候选首位，
+		// 每条请求都要先失败一次再换号（用户实测：尝试恒为 2）。
+		if status == http.StatusForbidden {
+			h.cfg.Pool.BlockModelBackoff(uid, model, "403 forbidden (WAF/权限拒绝)")
+			log.Printf("WARN: [server] upstream 403 -> block (account=%s model=%s) for backoff window", logfmt.UID8(uid), model)
+		}
 	}
 }
 

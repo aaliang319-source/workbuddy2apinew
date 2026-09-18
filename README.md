@@ -79,18 +79,54 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将 ``
 - 领养联动 / 任务查询：`scripts/task_runner.py`（成长任务一体机，默认 dry-run）
 - 个性化提示词：`prompt.file` 指向自定义提示词文件即整体替换内置默认
 
-### 新增子系统
+### 多 Key 管理
 
-- **`internal/keys`** — 网关侧 API Key 管理（生成 / 撤销 / 限流），不再依赖单一静态 `api_key`
-- **`internal/metrics`** — 账号 × 模型级调用次数 / 成功率 / 平均时延 / 积分消耗指标，本地 `data/metrics.json` 持久化（可选 Redis 镜像）
-- **`internal/notify`** — 通知派发，额度告警 / 异常事件通过 SMTP 模板化推送
-- **`internal/automation`** — 自动化引擎，定时任务结果通过 `data/automation.json` 留痕，供面板回放
+- **`internal/keys`** — 网关侧 API Key 管理：签发 / 吊销 / 备注，支持多 Key 并存
+- Key 落盘 `data/keys.json`（`keys_file` 可配），旧模式单一静态 `api_key` 仍然兼容
+- 请求明细按 Key 名归类（`key_name`），便于多租户 / 多客户端分摊排查
+
+### 指标与统计
+
+- **`internal/metrics`** — 按 `(账号, 模型)` 维度统计调用次数 / 成功率 / 平均时延 / 积分消耗
+- 默认 `./data/metrics.json` 落盘（`server.metrics_file` 可配），可选镜像至 Upstash Redis
+- **开关 `server.metrics_enabled`（缺省 false）**：不开则不记录观测，`/v1/stats` 提示关闭
+- **`GET /v1/stats`** — 聚合统计 + 最近请求明细（`recent` 环形缓冲）；**`POST /v1/stats/reset`** 清零累计
+- **请求明细含「上游实际模型」** — 出站 `model` 为 `auto` 档时，记录上游回传的真实模型（`resp_model`），用于确认实际路由结果
+
+### 通知
+
+- **`internal/notify`** — 额度告警 / 异常事件 SMTP 通知派发（`notify.*`）
+- 连接：`smtp_host` / `smtp_port`（缺省 587）/ `smtp_username` / `smtp_password` / `smtp_from` / `smtp_to[]`
+- TLS 模式 `smtp_tls`：`starttls`（587，默认）/ `tls`（465 隐式）/ `none`（明文，仅内网中继）
+- 触发条件：额度低于 `credits_threshold`、存在快过期额度（`expiring_days`）、账号切换等（`events.*` 逐项开关）
+- 防打扰：`throttle_hours` 限制同 `(事件, 账号)` 最小通知间隔；`scan_hours` 指定额度扫描整点（空 = 仅实时事件）
+
+### 自动化
+
+- **`internal/automation`** — 自动化任务引擎，驱动定时循环（`automation.enabled`，false 时回退 scheduler 原循环）
+- 运行历史落盘 `history_file`（默认 `./data/automation.json`），ring 保留 `history_runs` 条（默认 100）
+- 脚本类任务（school / cat）子进程超时 `script_timeout`（默认 `10m`）
+- 管理端点：`/admin/automation/{status,runs,runs/{id},run/{kind},apply}`（手动触发 / 历史 / 热更新）
 
 ### 协议适配
 
 - **`/v1/chat/completions`** — OpenAI 兼容流式 / 非流式（默认）
 - **`/v1/responses`** — OpenAI Responses API 适配
-- **`/v1/messages`** — Anthropic Messages API 兼容，支持 `claude-*` 模型路由到 CodeBuddy 对应模型
+- **`/v1/messages`** — Anthropic Messages API 兼容，支持 `claude-*` 模型路由到 CodeBuddy 对应模型（`anthropic.default_model` / `anthropic.model_map`）
+- **`/v1/stats`** — 指标聚合与请求明细（本 fork 新增）
+
+### Web 管理面板
+
+`gui/` 是与之配套的独立 Web 控制台（Go 后端 + React/Vite 前端），把命令行操作搬进浏览器：
+
+- **账号管理** — 发起 OAuth 授权、查看账号池状态、删除账号
+- **网关配置** — 表单 / JSON 双模式在线编辑，改前自动备份
+- **多 Key 管理** — 网页签发 / 吊销 API Key
+- **请求明细 / 统计** — 按模型聚合与逐条明细（含上游实际模型）
+- **自动化 / 通知** — 查看任务运行记录、配置通知
+- **系统操作** — 查询状态、重启网关（需挂载 `docker.sock`）
+
+启动方式见 [`gui/README.md`](gui/README.md)；`docker-compose.yml` 已包含 `wbgui` 服务（默认 `:8787`）。
 
 ## 架构总览
 
@@ -220,25 +256,6 @@ curl -s http://localhost:7863/v1/chat/completions \
 **6. 修改与分发。** 基于本项目源代码进行的任何修改、衍生均系第三方自发行为，与本项目无关，相应后果由该第三方自行承担。本项目内所有资源文件，禁止任何公众号、自媒体进行任何形式的转载、发布。未经授权，任何组织或个人不得将本项目内容用于转载、发布或再分发。
 
 **7. 条款变更。** 本项目保留随时修改、补充本声明的权利。修改后的声明自发布之日起生效，继续使用本项目即视为接受修订后的声明。本项目所有内容仅供学习和研究使用，请于学习研究完成后及时删除。
-
-## ☕ Coffee
-
-如果这个项目对你有帮助，欢迎请我喝杯咖啡～
-
-<table>
-  <tr>
-    <td align="center"><b>💰 Solana</b></td>
-    <td><code>AZAKF74rTu7UFVSNRzsKV4HHpTwarax6cG8KAh4fP5rQ</code></td>
-  </tr>
-  <tr>
-    <td align="center"><b>💎 Ethereum</b></td>
-    <td><code>0x1d418627aD6B043900CBE11fe439759bDF2b5170</code></td>
-  </tr>
-  <tr>
-    <td align="center"><b>₿ Bitcoin</b></td>
-    <td><code>bc1q9w7h4j9msyd9q6lhl0398n4s3g8h4vchpqvc2k</code></td>
-  </tr>
-</table>
 
 ## License
 

@@ -53,10 +53,13 @@ services:
       # 注意不要与网关的 config.json 共用同一路径 —— 两者字段不同。
       - ./config.json:/app/config.json:ro
       # 与网关共享账号目录：面板直接读写网关的 auths/
-      # 宿主机路径需按实际部署位置调整（官方默认 /root/workbuddy2api）
-      - /Users/aliang/Documents/workspace/magic/auths:/app/auths
+      # ⚠️ 宿主机路径需按你的实际部署位置修改（官方容器默认部署在 /root/workbuddy2api）。
+      #    下面按「与本仓库同级部署」给出示例，请按需改成绝对路径，例如：
+      #      - /root/workbuddy2api/auths:/app/auths
+      - ../auths:/app/auths
       # 网关的 config.json 挂到独立路径，仅供「网关配置」页编辑，不与面板配置混用
-      - /Users/aliang/Documents/workspace/magic/config.json:/gateway/config.json
+      #      - /root/workbuddy2api/config.json:/gateway/config.json
+      - ../config.json:/gateway/config.json
       # 面板数据目录（配置备份等）：挂到宿主机持久化，避免容器重建丢失
       - ./data:/data
       # docker.sock：用于「系统」页重启网关容器。

@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="WorkBuddy2API" width="120">
-</p>
-
 <h1 align="center">WorkBuddy2API</h1>
 
 <p align="center">
@@ -19,7 +15,6 @@
   <img alt="Responses" src="https://img.shields.io/badge/API-Responses_Compatible-10A37F?style=flat-square">
   <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Docker_Compose-2496ED?logo=docker&logoColor=white&style=flat-square">
   <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
-  <a href="https://t.me/sliverkiss_blog"><img alt="Telegram" src="https://img.shields.io/badge/Telegram-%E9%A2%91%E9%81%93-blue?logo=telegram&logoColor=white&style=flat-square"></a>
 </p>
 
 ---
@@ -34,7 +29,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将 ``
 
 > ⚠️ 合规须知：本项目是**非官方**网关，使用 ```CodeBuddy``` 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
 
-📖 完整文档见 [GitHub Wiki](https://github.com/Sliverkiss/workbuddy2api/wiki)。
+📖 更多说明见 [Wiki](https://github.com/aaliang319-source/workbuddy2apinew/wiki)。
 
 ## 核心能力
 
@@ -131,8 +126,8 @@ flowchart LR
 ### Docker Compose 一键部署
 
 ```bash
-git clone https://github.com/Sliverkiss/workbuddy2api.git
-cd workbuddy2api
+git clone https://github.com/aaliang319-source/workbuddy2apinew.git
+cd workbuddy2apinew
 cp config.example.json config.json
 ```
 

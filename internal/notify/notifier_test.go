@@ -139,12 +139,12 @@ func TestScanCreditsLowAndExpiring(t *testing.T) {
 func TestTemplateContainsKeyFields(t *testing.T) {
 	n, f := testNotifier(t, nil)
 	n.OnPoolEvent(pool.NoticeEvent{
-		Kind: "cooling", UID: "12345678-2c60-42f6-83cd-4833fee9c05f", Nickname: "测试用户",
+		Kind: "cooling", UID: "00000000-0000-4000-8000-000000000001", Nickname: "test-user",
 		Realm: "global", Reason: "429 rate limit", Credits: 2364, Expiring: 100,
 	})
 	got := waitMail(t, f, 1)
 	body := got[0].Body
-	for _, want := range []string{"账号路由切换", "测试用户", "12345678", "国际 global", "2364", "429 rate limit", "alive1"} {
+	for _, want := range []string{"账号路由切换", "test-user", "00000000", "国际 global", "2364", "429 rate limit", "alive1"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("body missing %q:\n%s", want, body)
 		}

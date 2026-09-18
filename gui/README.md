@@ -1,6 +1,6 @@
 <p align="center">
   <b>WorkBuddy2API Web GUI</b><br>
-  <sub>给 <a href="https://github.com/287775856/workbuddy2api">workbuddy2api</a> 网关配的可视化控制台</sub>
+  <sub>给 <a href="https://github.com/aaliang319-source/workbuddy2apinew">workbuddy2api</a> 网关配的可视化控制台</sub>
 </p>
 
 <p align="center">
@@ -14,7 +14,7 @@
 
 ## 📖 这是什么
 
-[workbuddy2api](https://github.com/287775856/workbuddy2api) 是一个把 CodeBuddy 账号变成 OpenAI 兼容 API 的网关。
+[workbuddy2api](https://github.com/aaliang319-source/workbuddy2apinew) 是一个把 CodeBuddy 账号变成 OpenAI 兼容 API 的网关。
 它本身**只有命令行工具**：加账号要 `./login.sh`、签到要 `./signin.sh`、看积分要 `./credit.sh`、改配置要手改 `config.json`。
 
 本项目为它补齐一个 **Web 控制台**，把上述操作全部搬进浏览器：

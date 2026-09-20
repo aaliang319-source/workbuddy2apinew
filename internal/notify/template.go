@@ -38,7 +38,7 @@ type Event struct {
 	Available []string
 }
 
-// subject 生成主题：`[workbuddy2api] 额度已耗尽 · 测试用户(12345678)`
+// subject 生成主题：`[workbuddy2api] 额度已耗尽 · 测试账号(12345678)`
 func (e Event) subject() string {
 	name := e.Nickname
 	if name == "" {

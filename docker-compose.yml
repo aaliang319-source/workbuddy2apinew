@@ -30,7 +30,7 @@ services:
       WBGUI_LISTEN: ":8787"
       # 面板登录凭据 —— 务必修改为强口令
       WBGUI_USERNAME: "admin"
-      WBGUI_PASSWORD: "REDACTED"
+      WBGUI_PASSWORD: "${WBGUI_PASSWORD:?请在 .env 中设置 WBGUI_PASSWORD}"
       # 网关地址与密钥（密钥留空时自动从挂载的网关 config.json 读取）
       WBGUI_GATEWAY_URL: "http://host.docker.internal:7863"
       WBGUI_AUTH_DIR: "/app/auths"

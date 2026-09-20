@@ -41,7 +41,9 @@ services:
       WBGUI_BACKUP_DIR: "/data/backups"
       WBGUI_CREDENTIALS_FILE: "/data/credentials.json"
       WBGUI_CONTAINER: "workbuddy2api"
-      WBGUI_DANGEROUS_OPS: "false"
+      # 高危操作总开关：解禁「重启网关」「删除账号」「恢复配置备份」。
+      # 本机自用已置 true —— 面板监听 0.0.0.0:8787 且口令较弱，请勿暴露到公网。
+      WBGUI_DANGEROUS_OPS: "true"
       WBGUI_READ_ONLY: "false"
     ports:
       - "8787:8787"

@@ -1,4 +1,7 @@
 FROM golang:1.23-alpine AS build
+# 国内网络直连 proxy.golang.org 会被拒（实测 dial tcp 142.251.34.209:443 refused），
+# 本项目依赖 redis/go-redis/v9，go mod download 必须走国内代理。direct 兜底。
+ENV GOPROXY=https://goproxy.cn,direct
 WORKDIR /src
 COPY go.mod ./
 RUN go mod download

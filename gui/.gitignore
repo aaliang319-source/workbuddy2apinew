@@ -11,7 +11,10 @@ wbgui
 # 前端依赖与构建产物（构建产物由 Dockerfile 生成，不入库）
 web/node_modules/
 web/dist/
-internal/webui/dist/
+# dist/ 目录本身不能整体忽略：webui.go 用 //go:embed all:dist、gui/Dockerfile 用
+# COPY internal/webui/dist，干净检出下若目录不存在会直接构建失败。保留 .gitkeep 占位。
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
 
 # 编辑器 / 系统
 .DS_Store

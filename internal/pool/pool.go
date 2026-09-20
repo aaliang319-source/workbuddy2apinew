@@ -43,6 +43,8 @@ type Pool struct {
 	stopCh chan struct{}
 	// closeOnce 保证 Close 幂等（多次调用不重复 close channel）。
 	closeOnce sync.Once
+	// spreadInFlight 在途分摊权重开关（SetSpreadInFlight 注入；New 缺省 true）。
+	spreadInFlight bool
 	// notifier 通知回调（SetNotifier 注入；nil = 关闭）。契约见 notice.go：持锁路径上必须非阻塞。
 	notifier NotifierFn
 	// availability "某 realm 当前可用账号"查询（SetAvailability 注入；nil = 不提供）。
@@ -59,6 +61,7 @@ func New(stateFp string) *Pool {
 		breakerCooldownMax: defaultBreakerCooldownMax,
 		idleWeightPerHour:  defaultIdleWeightPerHour,
 		idleWeightMax:      defaultIdleWeightMax,
+		spreadInFlight:     true, // 在途分摊权重缺省开启（防风控；SetSpreadInFlight 可关）
 	}
 	if stateFp != "" {
 		p.load()
@@ -102,6 +105,13 @@ func (p *Pool) SetWeights(idlePerHour, idleMax float64) {
 	if idleMax > 0 {
 		p.idleWeightMax = idleMax
 	}
+}
+
+// SetSpreadInFlight 开关「在途分摊权重」：开启后选号权重按 1/(1+在途数) 阻尼，
+// 并发叠加越多的账号被选中概率越低——并发请求自然分摊到多个账号，降低单账号
+// 并发集中触发上游风控的概率（防风控）。默认开启；与 max_in_flight 的硬上限互补。
+func (p *Pool) SetSpreadInFlight(on bool) {
+	p.spreadInFlight = on
 }
 
 // SetMaxInFlight 注入单账号最大在途请求数；0 = 不限。负值保留原值。

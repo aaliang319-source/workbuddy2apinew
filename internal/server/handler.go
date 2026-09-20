@@ -79,6 +79,9 @@ type Config struct {
 	AnthropicDefaultModel string
 	AnthropicModelMap     map[string]string
 
+	// WafCooldownDur 上游 403（WAF/风控）时的账号级短冷却时长；0 = 只做模型级避让。
+	WafCooldownDur time.Duration
+
 	// NotifyTest 发送一封通知测试邮件（nil = 通知未启用 → /admin/notify/test 返回 400）。
 	NotifyTest func() error
 
@@ -1082,8 +1085,15 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 不避让的后果：混合调度下高优先级账号被 403 后仍恒居候选首位，
 		// 每条请求都要先失败一次再换号（用户实测：尝试恒为 2）。
 		if status == http.StatusForbidden {
+			// 账号级短冷却（防风控）：冷却期间全部流量自动切其他账号（选号排除 +
+			// 邮件通知），避免并发叠加在同一账号上继续触发风控。先冷却再写模型
+			// 负缓存（Cooldown 会清 modelCooldowns，顺序不能反）。
+			if h.cfg.WafCooldownDur > 0 {
+				h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.cfg.WafCooldownDur, "WAF/风控 403，短冷却避让")
+			}
 			h.cfg.Pool.BlockModelBackoff(uid, model, "403 forbidden (WAF/权限拒绝)")
-			log.Printf("WARN: [server] upstream 403 -> block (account=%s model=%s) for backoff window", logfmt.UID8(uid), model)
+			log.Printf("WARN: [server] upstream 403 -> cooldown %v + block (account=%s model=%s)",
+				h.cfg.WafCooldownDur, logfmt.UID8(uid), model)
 		}
 	}
 }

@@ -137,6 +137,12 @@ type Config struct {
 
 	Pool struct {
 		MaxInFlight        int     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
+		// SpreadInFlight 在途分摊权重（防风控）：并发叠加越多的账号被选中概率越低，
+		// 并发请求自然分摊到空闲账号。缺省开启（显式 false 关闭）。
+		SpreadInFlight *bool `json:"spread_in_flight"`
+		// WafCooldown 上游 403（WAF/风控）时的账号级短冷却时长；0 = 关闭（只做
+		// 模型级负缓存避让）。默认 10m：冷却期间全部流量自动切其他账号。
+		WafCooldown string `json:"waf_cooldown"`
 		BreakerThreshold   int     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
 		BreakerCooldown    string  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
 		BreakerCooldownMax string  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
@@ -211,6 +217,7 @@ type Config struct {
 	ModelFallback []string `json:"model_fallback"`
 
 	// 解析后
+	WafCooldownDur      time.Duration `json:"-"`
 	SoftRateDur         time.Duration `json:"-"`
 	SoftRateMaxDur      time.Duration `json:"-"`
 	BreakerCooldownDur  time.Duration `json:"-"`
@@ -255,6 +262,7 @@ func Default() *Config {
 	c.Features.SanitizeBlacklistFingerprints = true
 	c.Prompt.Mode = "passthrough" // 缺省 passthrough：默认透传客户端原始 system；显式配置 custom 仍可覆盖回替换
 	c.Pool.MaxInFlight = 3
+	c.Pool.WafCooldown = "10m" // 403 风控账号级短冷却
 	c.Pool.BreakerThreshold = 3
 	c.Pool.BreakerCooldown = "30m"
 	c.Pool.BreakerCooldownMax = "6h"
@@ -453,6 +461,9 @@ func applyEnv(c *Config) {
 			c.Notify.ThrottleHours = n
 		}
 	}
+	if v := os.Getenv("WB2A_WAF_COOLDOWN"); v != "" {
+		c.Pool.WafCooldown = v
+	}
 	if v := os.Getenv("WB2A_MODEL_FALLBACK"); v != "" {
 		var fb []string
 		for _, p := range strings.Split(v, ",") {
@@ -601,6 +612,15 @@ func (c *Config) normalize() error {
 	}
 	// notify 段：映射为 notify.Config 并归一化校验（Enabled 但缺 SMTP 必需项 → 启动失败，
 	// 避免"配了却不通知"的静默失效）；同时把解析后的时长回填与校验扫描时刻。
+	// 403 风控账号级冷却时长："0" 显式关闭；非法/空回落默认 10m。
+	if c.Pool.WafCooldown == "" {
+		c.Pool.WafCooldown = "10m"
+	}
+	if d, err := time.ParseDuration(c.Pool.WafCooldown); err != nil || d < 0 {
+		return fmt.Errorf("pool.waf_cooldown: %q 不是合法时长", c.Pool.WafCooldown)
+	} else {
+		c.WafCooldownDur = d
+	}
 	nc, err := c.BuildNotifyConfig()
 	if err != nil {
 		return err

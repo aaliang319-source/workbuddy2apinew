@@ -81,6 +81,7 @@ func main() {
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetSoftRateMax(cfg.SoftRateMaxDur) // 软冷却指数退避封顶（soft_rate_max，默认 2h）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
+	p.SetSpreadInFlight(boolOrTrue(cfg.Pool.SpreadInFlight)) // 在途分摊权重（防风控）
 
 	// 邮件通知（可选）：pool 事件回调（额度耗尽/账号路由切换）+ 周期额度扫描。
 	// Start/StartScan 需要 ctx，故此处只构建并注入回调，启动放到信号 ctx 创建之后。
@@ -254,6 +255,8 @@ func main() {
 		NotifyTest: notifyTestFn(nt),
 		// 模型回退白名单（切模型故障转移）。
 		ModelFallback: cfg.ModelFallback,
+		// 403 风控账号级短冷却时长（0 = 关闭，只做模型级避让）。
+		WafCooldownDur: cfg.WafCooldownDur,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

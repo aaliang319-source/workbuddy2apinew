@@ -102,3 +102,30 @@ func TestAvailabilityInjection(t *testing.T) {
 		t.Fatalf("availability wiring wrong: %v", got)
 	}
 }
+
+// 在途分摊权重（防风控）：权重按 1/(1+在途数) 阻尼；开关关闭时原样返回。
+func TestSpreadInFlightDamping(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "a", Domain: "www.codebuddy.cn"})
+	ea := p.byUID["a"]
+
+	// 开启（缺省）：在途 0 不衰减；在途 2 → 衰减到 1/3
+	base := 100.0
+	if got := p.dampWeight(ea, base); got != base {
+		t.Fatalf("in-flight 0 should not damp, got %v", got)
+	}
+	ea.inFlight.Store(2)
+	if got := p.dampWeight(ea, base); got > base/3+0.01 {
+		t.Fatalf("in-flight 2 should damp to <=1/3, got %v", got)
+	}
+	// 关闭：原样返回
+	p.SetSpreadInFlight(false)
+	if got := p.dampWeight(ea, base); got != base {
+		t.Fatalf("spread off should not damp, got %v", got)
+	}
+	p.SetSpreadInFlight(true)
+	ea.inFlight.Store(0)
+	if got := p.dampWeight(ea, base); got != base {
+		t.Fatalf("in-flight 0 should not damp, got %v", got)
+	}
+}

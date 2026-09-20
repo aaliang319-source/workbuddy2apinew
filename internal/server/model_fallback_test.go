@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/keys"
@@ -269,5 +270,45 @@ func TestKeyModelUnrestrictedPassesThrough(t *testing.T) {
 	}
 	if strings.Contains(string(captured), `"model":"deepseek-v4.1-flash"`) {
 		t.Fatal("unrestricted key must not reroute models")
+	}
+}
+
+// 403 风控 → 账号级短冷却 + 模型负缓存双写；WafCooldownDur=0 时只做模型级避让。
+func TestWAF403AccountCooldown(t *testing.T) {
+	for _, dur := range []time.Duration{10 * time.Minute, 0} {
+		p, _, h, kv, _ := func() (*pool.Pool, *auth.Auth, *Handler, string, *[]byte) {
+			auth.SetGlobalEnabled(true)
+			cn := &auth.Auth{UID: "waf-cn-1", AccessToken: "at-1", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"}
+			pp := testPoolWith(cn)
+			st, _ := keys.Load(filepath.Join(t.TempDir(), "keys.json"), "")
+			k, _ := st.Create("waf")
+			_, _ = st.Update(k.ID, func(x *keys.Key) error {
+				x.Associations = []keys.Association{{UID: cn.UID, Priority: 1, Enabled: true}}
+				return nil
+			})
+			var captured []byte
+			up := newCapturingUpstream(t, &captured, func(authz string) (int, string, bool) {
+				return 403, `<!DOCTYPE html><title>WAF Block Page</title>`, false
+			})
+			h := NewHandler(Config{Pool: pp, Upstream: up, Keys: st, AdminKey: "adm", MaxBodyBytes: 1 << 20,
+				WafCooldownDur: dur, ModelFallback: nil})
+			return pp, cn, h, k.Value, &captured
+		}()
+		rec := postChat(h, kv, "any-model")
+		if rec.Code != 503 {
+			t.Fatalf("dur=%v: want 503, got %d", dur, rec.Code)
+		}
+		st := p.List()[0]
+		cooling := st.Cooling
+		blocked := len(st.RateLimitedModels) > 0
+		if dur > 0 && !cooling {
+			t.Fatalf("dur=%v: account should be cooling after WAF 403", dur)
+		}
+		if dur == 0 && cooling {
+			t.Fatalf("dur=0: account cooldown disabled but cooling=true")
+		}
+		if !blocked {
+			t.Fatalf("dur=%v: model block entry missing", dur)
+		}
 	}
 }

@@ -114,7 +114,7 @@ func (p *Pool) pickFromLocked(cands []*entry, reqModel string, now time.Time) *a
 	ws := make([]weighted, 0, len(cands))
 	for _, e := range cands {
 		if ti, _ := costTier(e); ti == bestTier {
-			ws = append(ws, weighted{e: e, w: p.weightOf(e, maxCredits, now)})
+			ws = append(ws, weighted{e: e, w: p.dampWeight(e, p.weightOf(e, maxCredits, now))})
 		}
 	}
 	// 等权重洗牌：仅当存在权重相等且候选数超过 top5 时，才对 ws 做 Fisher-Yates
@@ -341,3 +341,14 @@ func (p *Pool) weightOf(e *entry, maxCredits int64, now time.Time) float64 {
 }
 
 // SetCredits 更新账号余额。
+
+// dampWeight 在途分摊阻尼：权重按 1/(1+在途数) 折减。并发叠加越多的账号被加权
+// 随机抽中的概率越低（in=0 → ×1，in=1 → ×0.5，in=2 → ×0.33…），并发请求自然
+// 分摊到空闲账号，降低单账号并发集中触发上游风控的概率。spreadInFlight 关闭时
+// 原样返回（与引入前行为逐字一致）。
+func (p *Pool) dampWeight(e *entry, w float64) float64 {
+	if !p.spreadInFlight {
+		return w
+	}
+	return w / (1 + float64(e.inFlight.Load()))
+}

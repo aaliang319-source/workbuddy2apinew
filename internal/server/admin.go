@@ -87,6 +87,7 @@ func (h *Handler) adminUpdateKey(w http.ResponseWriter, r *http.Request) {
 		Name         *string             `json:"name"`
 		Enabled      *bool               `json:"enabled"`
 		Associations *[]keys.Association `json:"associations"`
+		Models       *[]keys.KeyModel    `json:"models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_json", err.Error())
@@ -101,6 +102,9 @@ func (h *Handler) adminUpdateKey(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.Associations != nil {
 			x.Associations = *body.Associations
+		}
+		if body.Models != nil {
+			x.Models = *body.Models // nil 数组不修改；空数组 = 清除模型限制
 		}
 		return nil
 	})

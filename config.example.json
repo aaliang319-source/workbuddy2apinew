@@ -95,5 +95,6 @@
     "history_file": "./data/automation.json",
     "script_timeout": "10m",
     "history_runs": 100
-  }
+  },
+  "model_fallback": []
 }

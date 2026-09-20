@@ -81,6 +81,10 @@ type Config struct {
 
 	// NotifyTest 发送一封通知测试邮件（nil = 通知未启用 → /admin/notify/test 返回 400）。
 	NotifyTest func() error
+
+	// ModelFallback 模型回退白名单（模型级故障转移：主模型被域内所有账号拒绝时
+	// 按序改用便宜模型）。nil/空 = 关闭。
+	ModelFallback []string
 }
 
 // notFoundCooldown 上游 404 的固定短冷却时长。
@@ -586,7 +590,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer st.done()
 	// /v1/stats 观测：出口统一上报一次（后注册先执行；旋转循环整体只记 1 次，
 	// 口径是"请求级"而非"尝试级"——最终 st.status 定 success/failed）。
-	defer h.observeMetrics(st, bareModel, peek.Stream)
+	servedModel := bareModel // 实际服务模型（模型回退后变化；出口按它记录明细/统计）
+	defer func() { h.observeMetrics(st, servedModel, peek.Stream) }()
 
 	tried := map[string]bool{}
 	var lastErr error
@@ -667,6 +672,26 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		body = rewriteModel(body, bareModel)
 	}
 
+	// Key 模型限制与优先级：Key 配置了模型白名单时，请求模型不在白名单内
+	// → 改路由到优先级最高的允许模型（真正的"限制"）；白名单同时决定该 Key
+	// 的回退顺序（见 nextFallbackModel）。未配置 = 不限制。
+	var keyModelSeq []string
+	if k := handlerKey(r); k != nil && len(k.Models) > 0 {
+		for _, m := range k.ModelsSorted() {
+			keyModelSeq = append(keyModelSeq, m.Name)
+		}
+		if !k.ContainsModel(bareModel) && len(keyModelSeq) > 0 {
+			if m0 := keyModelSeq[0]; m0 != bareModel {
+				body = rewriteModel(body, m0)
+				bareModel = m0
+				servedModel = m0
+				st.model = m0
+				log.Printf("WARN: [server] key model restriction: model %q not allowed for key %q -> rerouted to %q",
+					bareModel, k.Name, m0)
+			}
+		}
+	}
+
 	// 会话头族（issue #35）：后台按 X-Conversation-Request-ID（对话轮级）聚合请求，
 	// 官方客户端一次 user send 内所有 tool call/重试/换号复用同一个 ID。此处**轮转
 	// 循环外**生成一次，循环内每次出站原样复用 → 换号/重试/降级全部同 ID，后台不再
@@ -698,6 +723,31 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		keyScope = &pool.KeyScope{Allowed: h.cfg.Keys.AllowedUIDs(k.ID)}
 		st.keyName = k.Name // 单条明细：业务 Key 名
 	}
+	// nextFallbackModel 模型回退链：仅当当前模型已被域内所有可用账号拒绝
+	// （ModelGoneRealm）时放行下一个白名单候选；触发条件不成立即终止回退
+	// （账号全冷却等场景应等冷却而非悄悄换便宜模型）。每请求独立游标。
+	fbIdx := 0
+	// 回退候选序列：Key 配置了模型白名单 → 按其优先级降序（限内回退）；
+	// 未配置 → 全局 model_fallback 白名单。
+	fallbackSeq := keyModelSeq
+	if len(fallbackSeq) == 0 {
+		fallbackSeq = h.cfg.ModelFallback
+	}
+	nextFallbackModel := func(realm, current string) (string, bool) {
+		for fbIdx < len(fallbackSeq) {
+			fb := fallbackSeq[fbIdx]
+			fbIdx++
+			if fb == "" || fb == current {
+				continue
+			}
+			if !h.cfg.Pool.ModelGoneRealm(realm, current) {
+				return "", false
+			}
+			return fb, true
+		}
+		return "", false
+	}
+
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		// 粘性号不在本 Key 关联集内（他 Key 绑定/关联已变更）时先解绑，避免跨 Key 泄漏流量。
@@ -724,6 +774,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			acct = h.cfg.Pool.PickForKey(tried, bareModel, pickRealm, keyScope)
 		}
 		if acct == nil {
+			// 模型级故障转移：主模型已被域内所有可用账号拒绝（11102/403 负缓存）
+			// 且账号本身健康时，按白名单切到便宜模型重试（换模型不消耗轮换名额）。
+			if fb, ok := nextFallbackModel(pickRealm, bareModel); ok {
+				body = rewriteModel(body, fb)
+				bareModel = fb
+				servedModel = fb
+				st.model = fb
+				tried = map[string]bool{} // 换模型后按新模型重新评估各账号
+				i--
+				continue
+			}
 			st.status = http.StatusServiceUnavailable
 			// 明细失败原因：仅当此前没有更具体的失败分类时才填兜底值
 			//（先撞 hard_credit 再无号可用，记 hard_credit 对用户更有信息量）。

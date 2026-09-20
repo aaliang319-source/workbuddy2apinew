@@ -158,3 +158,27 @@ func TestConcurrentCRUDAndAuth(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestKeyModelsSortedAndContains(t *testing.T) {
+	k := Key{Models: []KeyModel{
+		{Name: "glm-5.3-flash", Priority: 50},
+		{Name: "deepseek-v4.1-flash", Priority: 100},
+		{Name: "auto", Priority: 100},
+	}}
+	sorted := k.ModelsSorted()
+	// 同优先级按名字稳定排序（auto < deepseek…）
+	if sorted[0].Name != "auto" || sorted[1].Name != "deepseek-v4.1-flash" || sorted[2].Name != "glm-5.3-flash" {
+		t.Fatalf("sort wrong: %+v", sorted)
+	}
+	if !k.ContainsModel("auto") || k.ContainsModel("glm-5.3") {
+		t.Fatalf("contains wrong")
+	}
+	// 空白名单 = 不限制
+	empty := Key{}
+	if !empty.ContainsModel("anything") {
+		t.Fatal("empty whitelist must allow all")
+	}
+	if len(empty.ModelsSorted()) != 0 {
+		t.Fatal("empty sort")
+	}
+}

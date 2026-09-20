@@ -1,4 +1,4 @@
-<h1 align="center">WorkBuddy2API</h1>
+<h1 align="center">WorkBuddy2APInew</h1>
 
 <p align="center">
   <b>把 CodeBuddy 账号变成 OpenAI 兼容 API 的多账号网关</b><br>
@@ -21,7 +21,7 @@
 
 ## 项目简介
 
-WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将 ```CodeBuddy``` 账号包装为统一的 `/v1/chat/completions` 服务。
+WorkBuddy2APInew 是一个自托管的 **OpenAI 兼容反向代理网关**，将 ```CodeBuddy``` 账号包装为统一的 `/v1/chat/completions` 服务。
 
 - 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（`login.sh`）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却 / 熔断防止雪崩、会话粘性保证多轮上下文不跳号；
@@ -134,7 +134,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将 ``
 flowchart LR
     Client["客户端 / SDK\nOpenAI 兼容请求"] --> H
 
-    subgraph GWI["WorkBuddy2API 网关 :7863"]
+    subgraph GWI["WorkBuddy2APInew 网关 :7863"]
         H["HTTP Handler\n鉴权 · 请求体上限 · 提示词改写 · 轮转"] --> P
         H --> S
         P["账号池\n四因子加权 · 熔断 · 冷却 · 租约"] --> U

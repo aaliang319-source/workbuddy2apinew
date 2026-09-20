@@ -198,57 +198,147 @@ func translateMessagesToOpenAI(msgs []anthropicMessage) ([]map[string]any, error
 }
 
 // translateUserBlocks 把 user 消息的 block 数组翻译为 0..n 条 OpenAI 消息：
-// text 块累积成一条 user 消息；tool_result 块逐块独立成 role=tool 消息。
+//   - 纯文本块合成一条字符串 content 的 user 消息（零损耗，与旧实现同形态）；
+//   - 含 image 块时该条消息 content 变为 parts 数组（text / image_url 按出现顺序混排）；
+//   - tool_result 块逐块独立成 role=tool 消息（工具结果含 image——Claude Code 的
+//     截图经 Read 工具返回即此形态——content 为 image_url+text 的 parts 数组）。
 func translateUserBlocks(blocks []anthropicBlock) ([]map[string]any, error) {
-	var out []map[string]any
-	var texts []string
-	flushText := func() {
-		if len(texts) > 0 {
-			out = append(out, map[string]any{"role": "user", "content": strings.Join(texts, "\n")})
-			texts = texts[:0]
+	out := make([]map[string]any, 0, len(blocks))
+	var parts []map[string]any // 当前 user 消息的 content parts（保持出现顺序）
+	flush := func() {
+		if len(parts) == 0 {
+			return
 		}
+		var content any = parts
+		textOnly := true
+		for _, p := range parts {
+			if p["type"] != "text" {
+				textOnly = false
+				break
+			}
+		}
+		if textOnly {
+			// 纯文本：多条 text 块以 \n 连接为字符串（旧形态）。
+			var sb strings.Builder
+			for i, p := range parts {
+				if i > 0 {
+					sb.WriteString("\n")
+				}
+				sb.WriteString(p["text"].(string))
+			}
+			content = sb.String()
+		}
+		out = append(out, map[string]any{"role": "user", "content": content})
+		parts = nil
 	}
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
 			if b.Text != "" {
-				texts = append(texts, b.Text)
+				parts = append(parts, map[string]any{"type": "text", "text": b.Text})
 			}
+		case "image":
+			url, err := imageURLFromSource(b.Source)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, map[string]any{
+				"type":      "image_url",
+				"image_url": map[string]any{"url": url},
+			})
 		case "tool_result":
-			flushText()
+			flush()
 			out = append(out, map[string]any{
 				"role":         "tool",
 				"tool_call_id": b.ToolUseID,
-				"content":      toolResultText(b),
+				"content":      toolResultContent(b),
 			})
-		case "image":
-			return nil, fmt.Errorf("image blocks are not supported by this gateway (cn:/global: text models only)")
 		default:
 			return nil, fmt.Errorf("unsupported user content block type %q", b.Type)
 		}
 	}
-	flushText()
+	flush()
 	return out, nil
 }
 
-// toolResultText 提取 tool_result 的文本内容：string 直取；[]block 取 text join。
-// 非文本块（如 image）在 tool_result 内按 Anthropic 语义跳过（工具结果以文本回传为主流）。
-func toolResultText(b anthropicBlock) string {
+// anthropicImageSource image 块的 source：base64（内联）或 url（引用）。
+type anthropicImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"` // base64 形态的 MIME 类型
+	Data      string `json:"data"`       // base64 形态的图片数据
+	URL       string `json:"url"`        // url 形态的图片地址
+}
+
+// imageURLFromSource 把 image.source 转成 OpenAI image_url 的 url 值：
+// base64 → data URL；url → 原样透传。
+func imageURLFromSource(raw json.RawMessage) (string, error) {
+	if len(raw) == 0 {
+		return "", fmt.Errorf("image block missing source")
+	}
+	var src anthropicImageSource
+	if err := json.Unmarshal(raw, &src); err != nil {
+		return "", fmt.Errorf("parse image source: %w", err)
+	}
+	switch src.Type {
+	case "base64":
+		if src.Data == "" {
+			return "", fmt.Errorf("image source base64 data is empty")
+		}
+		mt := src.MediaType
+		if mt == "" {
+			mt = "image/png"
+		}
+		return "data:" + mt + ";base64," + src.Data, nil
+	case "url":
+		if src.URL == "" {
+			return "", fmt.Errorf("image source url is empty")
+		}
+		return src.URL, nil
+	default:
+		return "", fmt.Errorf("unsupported image source type %q (base64 / url)", src.Type)
+	}
+}
+
+// toolResultContent 提取工具结果内容：string 直取；[]block 时 text join 为字符串；
+// 含 image 块（Claude Code 截图经 Read 工具返回）时返回 image_url+text 的 parts 数组。
+// 坏 source 的 image 块沿用旧口径跳过（不因单个坏块让整条工具结果失败）。
+func toolResultContent(b anthropicBlock) any {
 	var s string
 	if err := json.Unmarshal(b.Content, &s); err == nil {
 		return s
 	}
 	var blocks []anthropicBlock
-	if err := json.Unmarshal(b.Content, &blocks); err == nil {
-		var texts []string
-		for _, sub := range blocks {
-			if sub.Type == "text" && sub.Text != "" {
+	if err := json.Unmarshal(b.Content, &blocks); err != nil {
+		return ""
+	}
+	var texts []string
+	var parts []map[string]any
+	hasImage := false
+	for _, sub := range blocks {
+		switch sub.Type {
+		case "text":
+			if sub.Text != "" {
 				texts = append(texts, sub.Text)
 			}
+		case "image":
+			url, err := imageURLFromSource(sub.Source)
+			if err != nil {
+				continue
+			}
+			parts = append(parts, map[string]any{
+				"type":      "image_url",
+				"image_url": map[string]any{"url": url},
+			})
+			hasImage = true
 		}
+	}
+	if !hasImage {
 		return strings.Join(texts, "\n")
 	}
-	return ""
+	if len(texts) > 0 {
+		parts = append(parts, map[string]any{"type": "text", "text": strings.Join(texts, "\n")})
+	}
+	return parts
 }
 
 // anthropicSystemText 提取 system 字段文本：string 直取；[]block 取 text 块 join "\n"。

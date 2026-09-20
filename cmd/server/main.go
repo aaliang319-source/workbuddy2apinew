@@ -252,6 +252,8 @@ func main() {
 		AnthropicModelMap:     cfg.Anthropic.ModelMap,
 		// 通知测试发送（管理端点用）；未启用通知时为 nil → 端点返回 400 notify_disabled。
 		NotifyTest: notifyTestFn(nt),
+		// 模型回退白名单（切模型故障转移）。
+		ModelFallback: cfg.ModelFallback,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

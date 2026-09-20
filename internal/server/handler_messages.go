@@ -83,7 +83,8 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	st := newChatStat(time.Now(), body, req.Stream)
 	st.proto = "anthropic" // 单条明细协议来源
 	defer st.done()
-	defer h.observeMetrics(st, bareModel, req.Stream)
+	servedModel := bareModel // 实际服务模型（模型回退后变化；出口按它记录明细/统计）
+	defer func() { h.observeMetrics(st, servedModel, req.Stream) }()
 
 	tried := map[string]bool{}
 	var lastErr error
@@ -142,6 +143,25 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 		body = rewriteModel(body, bareModel)
 	}
 
+	// Key 模型限制与优先级（与 chatCompletions 同构）：白名单外请求改路由到
+	// 优先级最高的允许模型；白名单决定该 Key 的回退顺序。
+	var keyModelSeq []string
+	if k := handlerKey(r); k != nil && len(k.Models) > 0 {
+		for _, m := range k.ModelsSorted() {
+			keyModelSeq = append(keyModelSeq, m.Name)
+		}
+		if !k.ContainsModel(bareModel) && len(keyModelSeq) > 0 {
+			if m0 := keyModelSeq[0]; m0 != bareModel {
+				body = rewriteModel(body, m0)
+				bareModel = m0
+				servedModel = m0
+				st.model = m0
+				log.Printf("WARN: [server] key model restriction: model %q not allowed for key %q -> rerouted to %q",
+					bareModel, k.Name, m0)
+			}
+		}
+	}
+
 	// 会话头族：与 chatCompletions 同构（同轮 tool call / 换号 / 降级共享同一 ConversationRequestID）。
 	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body)}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
@@ -162,6 +182,28 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	if k := handlerKey(r); k != nil {
 		keyScope = &pool.KeyScope{Allowed: h.cfg.Keys.AllowedUIDs(k.ID)}
 	}
+	// nextFallbackModel 模型回退链（与 chatCompletions 同构）。
+	fbIdx := 0
+	// 回退候选序列：Key 白名单优先，未配置用全局 model_fallback（同构 chatCompletions）。
+	fallbackSeq := keyModelSeq
+	if len(fallbackSeq) == 0 {
+		fallbackSeq = h.cfg.ModelFallback
+	}
+	nextFallbackModel := func(realm, current string) (string, bool) {
+		for fbIdx < len(fallbackSeq) {
+			fb := fallbackSeq[fbIdx]
+			fbIdx++
+			if fb == "" || fb == current {
+				continue
+			}
+			if !h.cfg.Pool.ModelGoneRealm(realm, current) {
+				return "", false
+			}
+			return fb, true
+		}
+		return "", false
+	}
+
 	for i := 0; i < h.cfg.MaxRotate; i++ {
 		// 粘性号不在本 Key 关联集内（他 Key 绑定/关联已变更）时先解绑，避免跨 Key 泄漏流量。
 		if stickyUID != "" && keyScope != nil {
@@ -182,6 +224,16 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 			acct = h.cfg.Pool.PickForKey(tried, bareModel, pickRealm, keyScope)
 		}
 		if acct == nil {
+			// 模型级故障转移（与 chatCompletions 同构）。
+			if fb, ok := nextFallbackModel(pickRealm, bareModel); ok {
+				body = rewriteModel(body, fb)
+				bareModel = fb
+				servedModel = fb
+				st.model = fb
+				tried = map[string]bool{}
+				i--
+				continue
+			}
 			st.status = http.StatusServiceUnavailable
 			if st.errMsg == "" {
 				st.errMsg = "no_account_available(503)"

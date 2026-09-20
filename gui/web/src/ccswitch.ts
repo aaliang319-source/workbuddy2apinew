@@ -29,7 +29,7 @@ export interface CcSwitchFields {
 }
 
 /** buildCcSwitchLink 按官方 v1 协议拼 deep link（URLSearchParams 自动做百分号编码）。 */
-export function buildCcSwitchLink(app: 'claude' | 'codex', f: CcSwitchFields, name = 'WorkBuddy2API'): string {
+export function buildCcSwitchLink(app: 'claude' | 'codex', f: CcSwitchFields, name = 'WorkBuddy2APInew'): string {
   const p = new URLSearchParams({
     resource: 'provider',
     app,

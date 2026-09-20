@@ -110,7 +110,7 @@ function Shell({
         <div className="brand">
           <div className="brand-dot">WB</div>
           <div className="brand-text">
-            <strong>WorkBuddy 控制台</strong>
+            <strong>WorkBuddy2APInew 控制台</strong>
             <span>workbuddy2api 网关</span>
           </div>
         </div>

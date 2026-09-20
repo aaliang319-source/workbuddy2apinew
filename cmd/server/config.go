@@ -205,6 +205,11 @@ type Config struct {
 		} `json:"events"`
 	} `json:"notify"`
 
+	// ModelFallback 模型回退白名单（切模型故障转移）：请求的模型被域内所有账号
+	// 拒绝（11102 无此模型 / 403）时，按序改用白名单里的便宜模型（低倍率档）。
+	// 置空数组 = 关闭回退。默认 deepseek-v4.1-flash → glm-5.3-flash。
+	ModelFallback []string `json:"model_fallback"`
+
 	// 解析后
 	SoftRateDur         time.Duration `json:"-"`
 	SoftRateMaxDur      time.Duration `json:"-"`
@@ -266,6 +271,8 @@ func Default() *Config {
 	c.Automation.HistoryRuns = 100
 	// Anthropic /v1/messages：未知模型名缺省路由到国内版自动档。
 	c.Anthropic.DefaultModel = "cn:auto"
+	// 模型回退白名单（低倍率档便宜模型；显式置空数组关闭回退）。
+	c.ModelFallback = []string{"deepseek-v4.1-flash", "glm-5.3-flash"}
 	// 通知缺省关闭（需填 SMTP 后显式开启）；阈值/节流/扫描时刻给缺省值，
 	// 便于面板把整段表单渲染出来。ScanHours 缺省跟随签到后一小时（9/21 → 10/22）。
 	c.Notify.Enabled = false
@@ -444,6 +451,17 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_NOTIFY_THROTTLE_HOURS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Notify.ThrottleHours = n
+		}
+	}
+	if v := os.Getenv("WB2A_MODEL_FALLBACK"); v != "" {
+		var fb []string
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				fb = append(fb, p)
+			}
+		}
+		if len(fb) > 0 {
+			c.ModelFallback = fb
 		}
 	}
 	if v := os.Getenv("WB2A_NOTIFY_SCAN_HOURS"); v != "" {

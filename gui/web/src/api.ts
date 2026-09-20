@@ -17,6 +17,7 @@ import type {
   LoginSession,
   ApiKeyEntry,
   KeyAssociation,
+  KeyModel,
   AutomationRun,
   AutomationStatus,
 } from './types'
@@ -176,7 +177,7 @@ export const api = {
   createKey: (name: string) => post<ApiKeyEntry>('/api/keys', { name }),
   updateKey: (
     id: string,
-    patch: { name?: string; enabled?: boolean; associations?: KeyAssociation[] },
+    patch: { name?: string; enabled?: boolean; associations?: KeyAssociation[]; models?: KeyModel[] },
   ) => put<ApiKeyEntry>(`/api/keys/${encodeURIComponent(id)}`, patch),
   deleteKey: (id: string) => del<{ ok: boolean }>(`/api/keys/${encodeURIComponent(id)}`),
   regenerateKey: (id: string) =>

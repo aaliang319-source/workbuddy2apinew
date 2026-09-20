@@ -396,6 +396,12 @@ export interface KeyAssociation {
   enabled: boolean
 }
 
+/** KeyModel Key 级模型白名单项：priority 越大越优先（回退顺序 / 白名单外改路由目标）。 */
+export interface KeyModel {
+  name: string
+  priority: number
+}
+
 /** ApiKeyEntry 网关业务 Key（value 为完整密钥，面板用于复制/生成深链）。 */
 export interface ApiKeyEntry {
   id: string
@@ -404,6 +410,8 @@ export interface ApiKeyEntry {
   enabled: boolean
   associations: KeyAssociation[]
   created_at: string
+  /** 模型白名单 + 优先级；空 = 不限制（全模型可用，回退走全局 model_fallback）。 */
+  models?: KeyModel[]
   /** 通配标记：仅 legacy 迁移的 default Key 为 true——未关联也可用全池（无优先级分层）。 */
   wildcard?: boolean
 }

@@ -30,6 +30,13 @@ type Association struct {
 	Enabled  bool   `json:"enabled"`
 }
 
+// KeyModel Key 级模型限制项：Name 允许使用的模型（裸名），Priority 越大越优先
+// （请求模型不可用时的回退顺序；请求模型不在白名单内时改路由到优先级最高的可用项）。
+type KeyModel struct {
+	Name     string `json:"name"`
+	Priority int    `json:"priority"`
+}
+
 // Key 一个业务 API Key。
 type Key struct {
 	ID           string        `json:"id"`
@@ -38,6 +45,9 @@ type Key struct {
 	Enabled      bool          `json:"enabled"`
 	Associations []Association `json:"associations"`
 	CreatedAt    time.Time     `json:"created_at"`
+	// Models 模型白名单 + 优先级（可选）。空 = 不限制（全模型可用，回退走全局
+	// model_fallback 白名单）；非空 = 该 Key 只能用列表内模型，回退按 Priority 降序。
+	Models []KeyModel `json:"models,omitempty"`
 	// Wildcard 通配标记：true 时未关联账号也可用全池（不过滤账号）。
 	// 仅首启从 legacy api_key 迁移的 default Key 置位——存量客户端零感知；
 	// 新建 Key 不允许通配（未关联账号即 403 key_not_provisioned，必须先关联）。
@@ -145,6 +155,32 @@ func (s *Store) AllowedUIDs(keyID string) map[string]int {
 		}
 	}
 	return out
+}
+
+// ModelsSorted 返回按 Priority 降序的模型白名单（Priority 相同按名字稳定排序）。
+func (k *Key) ModelsSorted() []KeyModel {
+	out := make([]KeyModel, len(k.Models))
+	copy(out, k.Models)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority > out[j].Priority
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+// ContainsModel 报告模型是否在 Key 的白名单内（白名单为空 = 不限制，恒 true）。
+func (k *Key) ContainsModel(name string) bool {
+	if len(k.Models) == 0 {
+		return true
+	}
+	for _, m := range k.Models {
+		if m.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // List 返回全部 Key（含完整 value——面板可信内网场景需要生成深链）。

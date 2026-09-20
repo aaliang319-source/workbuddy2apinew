@@ -6,6 +6,7 @@
 package pool
 
 import (
+	"strings"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -115,4 +116,32 @@ func (p *Pool) PickByUIDForModelScoped(uid, model, realm string, scope *KeyScope
 	}
 	e.lastUsed = now
 	return e.a
+}
+
+// ModelGoneRealm 报告"该模型已被 realm 域内所有可用账号拒绝"——切模型回退的触发信号。
+// 判定口径：域内每个非禁用账号，要么对该模型有活跃的拒绝负缓存（11102 无此模型 /
+// 403 WAF 拒绝），要么账号本身不健康（账号级冷却/熔断——无法证明它有该模型）。
+// 只要还有"健康且未拒绝过该模型"的账号，就不算模型没了（轮换还会试它）。
+// 6004 模型级限流不算"模型没了"（会自动重置，等冷却而非切模型）。
+// realm==""（混合调度）统计全池。调用方不持锁。
+func (p *Pool) ModelGoneRealm(realm, model string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	blocked, healthy := 0, 0
+	for _, e := range p.byUID {
+		if e.disabled || (realm != "" && e.a.Realm() != realm) {
+			continue
+		}
+		if mc, ok := e.modelCooldowns[model]; ok && now.Before(mc.Until) {
+			if strings.HasPrefix(mc.Reason, "11102") || strings.HasPrefix(mc.Reason, "403") {
+				blocked++
+			}
+			continue
+		}
+		if e.healthy(now) {
+			healthy++
+		}
+	}
+	return blocked > 0 && healthy == 0
 }

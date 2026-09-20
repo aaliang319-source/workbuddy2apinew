@@ -5,7 +5,7 @@
 // credits/闲置/成功率加权随机（与全池调度同口径）。
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api'
-import type { Account, ApiKeyEntry, KeyAssociation } from '../types'
+import type { Account, ApiKeyEntry, KeyAssociation, KeyModel } from '../types'
 import { buildCcSwitchLink, gatewayEndpoint, minimalCcSwitchFields } from '../ccswitch'
 import { Alert, Badge, ConfirmDialog, fmtISO, Modal, Spinner } from '../ui'
 
@@ -142,6 +142,7 @@ export default function Keys({ writable }: { writable: boolean }) {
                   <th>名称</th>
                   <th>密钥</th>
                   <th>状态</th>
+                  <th>模型限制</th>
                   <th>关联账号 / 优先级</th>
                   <th>创建时间</th>
                   <th>操作</th>
@@ -184,6 +185,15 @@ export default function Keys({ writable }: { writable: boolean }) {
                         >
                           {k.enabled ? <Badge cls="badge-ok">启用</Badge> : <Badge cls="badge-danger">禁用</Badge>}
                         </button>
+                      </td>
+                      <td>
+                        {(k.models ?? []).length === 0 ? (
+                          <span className="text-dim" style={{ fontSize: 12 }}>不限制</span>
+                        ) : (
+                          <span className="mono" style={{ fontSize: 11 }}>
+                            {(k.models ?? []).slice().sort((a, b) => b.priority - a.priority).map((m) => m.name).join(' > ')}
+                          </span>
+                        )}
                       </td>
                       <td>
                         {enabledAssocs.length === 0 ? (
@@ -306,8 +316,8 @@ function CcSwitchButtons({ keyName, apiKey }: { keyName: string; apiKey: string 
 
   if (!endpoint) return null
   const f = minimalCcSwitchFields(endpoint, apiKey)
-  const claudeLink = buildCcSwitchLink('claude', f, keyName || 'WorkBuddy2API')
-  const codexLink = buildCcSwitchLink('codex', f, keyName || 'WorkBuddy2API')
+  const claudeLink = buildCcSwitchLink('claude', f, keyName || 'WorkBuddy2APInew')
+  const codexLink = buildCcSwitchLink('codex', f, keyName || 'WorkBuddy2APInew')
 
   const copy = async (app: 'claude' | 'codex', link: string) => {
     try {
@@ -399,11 +409,46 @@ function EditKeyDialog({
   const [assocs, setAssocs] = useState<KeyAssociation[]>(
     (keyEntry.associations ?? []).map((a) => ({ ...a })),
   )
+  const [models, setModels] = useState<KeyModel[]>(
+    (keyEntry.models ?? []).map((m) => ({ ...m })),
+  )
   const [name, setName] = useState(keyEntry.name)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // 网关可用模型清单（供白名单勾选；去掉路由前缀）
+  const [gatewayModels, setGatewayModels] = useState<string[]>([])
 
   const inGateway = useMemo(() => new Set(accounts.filter((a) => a.in_gateway).map((a) => a.uid)), [accounts])
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await api.models()
+        if (cancelled) return
+        const ids = (res.data ?? []).map((m) => m.id.replace(/^(cn|global):/, ''))
+        setGatewayModels([...new Set(ids)].sort())
+      } catch {
+        /* 模型列表拉取失败不阻塞编辑 */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const isModelSelected = (name: string) => models.some((m) => m.name === name)
+  const getModel = (name: string) => models.find((m) => m.name === name)
+  const toggleModel = (name: string) => {
+    setModels((prev) =>
+      prev.some((m) => m.name === name)
+        ? prev.filter((m) => m.name !== name)
+        : [...prev, { name, priority: 10 }],
+    )
+  }
+  const patchModel = (name: string, p: Partial<KeyModel>) => {
+    setModels((prev) => prev.map((m) => (m.name === name ? { ...m, ...p } : m)))
+  }
 
   const isSelected = (uid: string) => assocs.some((a) => a.uid === uid)
   const getAssoc = (uid: string) => assocs.find((a) => a.uid === uid)
@@ -431,7 +476,7 @@ function EditKeyDialog({
     setBusy(true)
     setError(null)
     try {
-      await api.updateKey(keyEntry.id, { name: name.trim(), associations: assocs })
+      await api.updateKey(keyEntry.id, { name: name.trim(), associations: assocs, models })
       await onSaved(`Key「${name.trim()}」已更新（热生效，无需重启网关）`)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : '保存失败')
@@ -553,6 +598,59 @@ function EditKeyDialog({
           <strong>域是硬性隔离</strong>：国内模型（裸模型名 / <span className="mono">cn:</span> 前缀）只在
           「国内 cn」账号里选号，<strong>国际 global 账号不会参与</strong>；反之 <span className="mono">global:</span>
           {' '}前缀模型只走国际账号。所以给国际账号设再高的优先级，也不会影响国内模型的调度结果。
+        </div>
+      </div>
+      <div className="field">
+        <label>
+          模型限制（可选）：勾选后该 Key 只能用这些模型；请求其他模型会自动改路由到
+          优先级最高的可用模型，当前模型不可用时按优先级降序回退。留空 = 不限制。
+        </label>
+        {gatewayModels.length === 0 ? (
+          <div className="empty">模型列表不可用（网关未就绪），可稍后再编辑保存。</div>
+        ) : (
+          <div className="table-wrap" style={{ maxHeight: 240, overflowY: 'auto' }}>
+            <table>
+              <thead>
+                <tr>
+                  <th style={{ width: 36 }}></th>
+                  <th>模型</th>
+                  <th style={{ width: 110 }}>优先级</th>
+                </tr>
+              </thead>
+              <tbody>
+                {gatewayModels.map((name) => {
+                  const sel = isModelSelected(name)
+                  const m = getModel(name)
+                  return (
+                    <tr key={name} style={sel ? { background: 'var(--accent-weak, rgba(59,130,246,.08))' } : undefined}>
+                      <td>
+                        <input type="checkbox" checked={sel} onChange={() => toggleModel(name)} />
+                      </td>
+                      <td className="mono" style={{ fontSize: 12 }}>{name}</td>
+                      <td>
+                        {sel && m ? (
+                          <input
+                            type="number"
+                            className="mono"
+                            value={m.priority}
+                            onChange={(e) => patchModel(name, { priority: parseInt(e.target.value, 10) || 0 })}
+                            style={{ width: 80 }}
+                          />
+                        ) : (
+                          <span className="text-faint">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <div className="desc" style={{ marginTop: 8 }}>
+          典型用法（成本控制）：只勾 <span className="mono">deepseek-v4.1-flash</span>（x0.03）与{' '}
+          <span className="mono">glm-5.3-flash</span>（x0.06）这类低倍率模型——
+          Claude Code 的 auto/高级模型请求会被自动改路由到它们，避免 0.7+ 倍率的意外扣费。
         </div>
       </div>
     </Modal>

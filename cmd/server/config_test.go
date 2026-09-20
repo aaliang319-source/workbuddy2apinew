@@ -834,3 +834,18 @@ func TestNotifyEnvOverride(t *testing.T) {
 		t.Errorf("env scan hours wrong: %v", got)
 	}
 }
+
+func TestModelFallbackDefaults(t *testing.T) {
+	c := Default()
+	if len(c.ModelFallback) != 2 || c.ModelFallback[0] != "deepseek-v4.1-flash" || c.ModelFallback[1] != "glm-5.3-flash" {
+		t.Fatalf("fallback defaults wrong: %v", c.ModelFallback)
+	}
+	t.Setenv("WB2A_MODEL_FALLBACK", "cheap-a, cheap-b ,")
+	c2, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c2.ModelFallback) != 2 || c2.ModelFallback[0] != "cheap-a" || c2.ModelFallback[1] != "cheap-b" {
+		t.Fatalf("env override wrong: %v", c2.ModelFallback)
+	}
+}

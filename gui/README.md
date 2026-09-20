@@ -1,5 +1,5 @@
 <p align="center">
-  <b>WorkBuddy2API Web GUI</b><br>
+  <b>WorkBuddy2APInew Web GUI</b><br>
   <sub>给 <a href="https://github.com/aaliang319-source/workbuddy2apinew">workbuddy2api</a> 网关配的可视化控制台</sub>
 </p>
 

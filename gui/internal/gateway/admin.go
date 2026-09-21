@@ -18,6 +18,12 @@ type AdminAssociation struct {
 	Enabled  bool   `json:"enabled"`
 }
 
+// AdminKeyModel Key 级模型限制项（镜像网关 keys.KeyModel）。
+type AdminKeyModel struct {
+	Name     string `json:"name"`
+	Priority int    `json:"priority"` // 越大越优先（回退顺序）
+}
+
 // AdminKey 网关业务 Key 条目（镜像网关 keys.Key；含完整 value 供深链/复制）。
 type AdminKey struct {
 	ID           string             `json:"id"`
@@ -25,17 +31,19 @@ type AdminKey struct {
 	Value        string             `json:"value"`
 	Enabled      bool               `json:"enabled"`
 	Associations []AdminAssociation `json:"associations"`
+	Models       []AdminKeyModel    `json:"models,omitempty"`
 	CreatedAt    time.Time          `json:"created_at"`
 	// Wildcard 通配标记（网关侧只对 legacy 迁移的 default Key 置位）：
 	// 未关联账号也可用全池——UI 需与"未关联=不可用"区分显示。
 	Wildcard bool `json:"wildcard,omitempty"`
 }
 
-// AdminKeyPatch Key 更新载荷（nil 字段 = 不修改；Associations 为全量替换）。
+// AdminKeyPatch Key 更新载荷（nil 字段 = 不修改；Associations / Models 为全量替换）。
 type AdminKeyPatch struct {
 	Name         *string             `json:"name,omitempty"`
 	Enabled      *bool               `json:"enabled,omitempty"`
 	Associations *[]AdminAssociation `json:"associations,omitempty"`
+	Models       *[]AdminKeyModel    `json:"models,omitempty"`
 }
 
 // adminDecode 统一处理 /admin/* 响应：非 200 翻译错误，200 解析 JSON 到 out。

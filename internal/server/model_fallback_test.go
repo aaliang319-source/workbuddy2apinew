@@ -101,8 +101,10 @@ func TestModelFallbackOnModelGone(t *testing.T) {
 	}
 }
 
-func TestModelFallbackNotTriggeredByRateLimit(t *testing.T) {
-	// 账号级 429 限流 ≠ 模型没了：不回退（等冷却），仍 503。
+// TestModelFallbackOnRateLimitExhaustion 语义更新后：账号级限流把域内账号全部打入
+// 冷却（当前模型无账号可服务）→ 同样按白名单回退尝试便宜模型；本例上游对回退模型
+// 也 429，最终仍 429，但回退轮换确实发生了（captured 含 deepseek 尝试）。
+func TestModelFallbackOnRateLimitExhaustion(t *testing.T) {
 	auth.SetGlobalEnabled(true)
 	cn1 := &auth.Auth{UID: "fb-cn-1", AccessToken: "at-1", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"}
 	cn2 := &auth.Auth{UID: "fb-cn-2", AccessToken: "at-2", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"}
@@ -114,16 +116,18 @@ func TestModelFallbackNotTriggeredByRateLimit(t *testing.T) {
 		return nil
 	})
 	var captured []byte
-	upSlow := newCapturingUpstream(t, &captured, func(string) (int, string, bool) { return 429, `{"error":{"msg":"rate limited"}}`, true })
+	upSlow := newCapturingUpstream(t, &captured, func(string) (int, string, bool) {
+		return 429, `{"error":{"msg":"rate limited"}}`, true
+	})
 	h := NewHandler(Config{Pool: p, Upstream: upSlow, Keys: st, AdminKey: "adm", MaxBodyBytes: 1 << 20,
 		ModelFallback: []string{"deepseek-v4.1-flash"}})
 	rec := postChat(h, k.Value, "some-model")
-	// 账号级限流以 429 收场（冷却兜底会再试冷却号），绝不回退换模型。
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("rate-limited should 429 without fallback, got %d body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusTooManyRequests && rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("exhausted rate limits: want 429/503, got %d body=%s", rec.Code, rec.Body.String())
 	}
-	if strings.Contains(string(captured), `"model":"deepseek-v4.1-flash"`) {
-		t.Fatal("fallback must not trigger on rate limits")
+	// 关键断言：限流耗尽后回退轮换确实尝试了便宜模型。
+	if !strings.Contains(string(captured), `"model":"deepseek-v4.1-flash"`) {
+		t.Fatal("fallback should be attempted when rate limits exhaust all accounts")
 	}
 }
 
@@ -133,17 +137,23 @@ func TestModelGoneRealmSignal(t *testing.T) {
 	p.Add(&auth.Auth{UID: "b", Domain: "www.codebuddy.cn"})
 
 	// 无任何负缓存：不算模型没了。
-	if p.ModelGoneRealm("cn", "m1") {
+	if p.ModelGoneRealm("cn", "m1", nil) {
 		t.Fatal("no blocks should be false")
 	}
 	// 全部账号 11102 负缓存 → true。
 	p.BlockModelBackoff("a", "m1", "11102 model not available")
 	p.BlockModelBackoff("b", "m1", "11102 model not available")
-	if !p.ModelGoneRealm("cn", "m1") {
+	if !p.ModelGoneRealm("cn", "m1", nil) {
 		t.Fatal("all blocked should be true")
 	}
-	// 6004 限流不算"模型没了"（另一个模型的缓存不影响 m2）。
-	if p.ModelGoneRealm("cn", "m2") {
+	// 6004 限流也算"当前无账号可服务"（重置墙钟可能在数小时后，按白名单切模型）。
+	p.BlockModelBackoff("a", "m2", "6004 model rate limit")
+	p.BlockModelBackoff("b", "m2", "6004 model rate limit")
+	if !p.ModelGoneRealm("cn", "m2", nil) {
+		t.Fatal("all 6004-limited should be true (fallback to cheaper model)")
+	}
+	// 其他模型的缓存不影响 m3。
+	if p.ModelGoneRealm("cn", "m3", nil) {
 		t.Fatal("other model should be false")
 	}
 }

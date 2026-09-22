@@ -6,7 +6,6 @@
 package pool
 
 import (
-	"strings"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -82,6 +81,7 @@ func (p *Pool) PickForKey(tried map[string]bool, reqModel, realm string, scope *
 //     PickForKey 按层重选）。没有这一步，粘性会把同一会话永久钉在低优先层：
 //     绑定一旦落在 prio 6 的号上，prio 10/9 的号再健康也永远拿不到流量，
 //     优先级形同虚设（用户实测：全部请求都打在最低优先级账号）。
+//
 // scope 为 nil/空（旧单 Key 模式或通配 Key）时退化为 PickByUIDForModel。
 func (p *Pool) PickByUIDForModelScoped(uid, model, realm string, scope *KeyScope) *auth.Auth {
 	if scope == nil || len(scope.Allowed) == 0 {
@@ -118,30 +118,36 @@ func (p *Pool) PickByUIDForModelScoped(uid, model, realm string, scope *KeyScope
 	return e.a
 }
 
-// ModelGoneRealm 报告"该模型已被 realm 域内所有可用账号拒绝"——切模型回退的触发信号。
-// 判定口径：域内每个非禁用账号，要么对该模型有活跃的拒绝负缓存（11102 无此模型 /
-// 403 WAF 拒绝），要么账号本身不健康（账号级冷却/熔断——无法证明它有该模型）。
-// 只要还有"健康且未拒绝过该模型"的账号，就不算模型没了（轮换还会试它）。
-// 6004 模型级限流不算"模型没了"（会自动重置，等冷却而非切模型）。
-// realm==""（混合调度）统计全池。调用方不持锁。
-func (p *Pool) ModelGoneRealm(realm, model string) bool {
+// ModelGoneRealm 报告"该模型在 realm 域内当前没有任何账号能立即服务"——切模型
+// 回退的触发信号。判定口径：域内每个非禁用账号，要么对该模型有活跃冷却（6004 模型级
+// 限流 / 11102 无此模型 / 403 WAF 拒绝），要么账号本身不健康（账号级冷却/熔断）。
+// 只要还有"健康且无该模型冷却"的账号，就不算模型没了（轮换还会试它）。
+// 6004 也计入：模型级限流的重置墙钟可能在数小时后，与其让请求 503 干等，
+// 不如按白名单切到便宜模型（用户语义：所有账号的模型都服务不了 → 切模型）。
+// realm==""（混合调度）统计全 realm；scope 非 nil 时再按 Key 关联集过滤——
+// 回退判定必须只看该 Key 实际能用到的账号（否则域内健康但与本 Key 无关的账号
+// 会把信号压成 false，导致该 Key 的请求 503 而不回退）。调用方不持锁。
+func (p *Pool) ModelGoneRealm(realm, model string, scope *KeyScope) bool {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
-	blocked, healthy := 0, 0
+	total, available := 0, 0
 	for _, e := range p.byUID {
 		if e.disabled || (realm != "" && e.a.Realm() != realm) {
 			continue
 		}
-		if mc, ok := e.modelCooldowns[model]; ok && now.Before(mc.Until) {
-			if strings.HasPrefix(mc.Reason, "11102") || strings.HasPrefix(mc.Reason, "403") {
-				blocked++
+		if scope != nil && len(scope.Allowed) > 0 {
+			if _, ok := scope.Allowed[e.a.UID]; !ok {
+				continue
 			}
-			continue
+		}
+		total++
+		if mc, ok := e.modelCooldowns[model]; ok && now.Before(mc.Until) {
+			continue // 该账号对该模型有活跃冷却（6004/11102/403）→ 暂不可用
 		}
 		if e.healthy(now) {
-			healthy++
+			available++
 		}
 	}
-	return blocked > 0 && healthy == 0
+	return total > 0 && available == 0
 }

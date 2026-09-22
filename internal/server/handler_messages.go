@@ -182,7 +182,7 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	if k := handlerKey(r); k != nil {
 		keyScope = &pool.KeyScope{Allowed: h.cfg.Keys.AllowedUIDs(k.ID)}
 	}
-	// nextFallbackModel 模型回退链（与 chatCompletions 同构）。
+	// nextFallbackModel 模型回退链（与 chatCompletions 同构；6004/11102/403/账号冷却均计入"无账号可服务"）。
 	fbIdx := 0
 	// 回退候选序列：Key 白名单优先，未配置用全局 model_fallback（同构 chatCompletions）。
 	fallbackSeq := keyModelSeq
@@ -196,7 +196,7 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 			if fb == "" || fb == current {
 				continue
 			}
-			if !h.cfg.Pool.ModelGoneRealm(realm, current) {
+			if !h.cfg.Pool.ModelGoneRealm(realm, current, keyScope) {
 				return "", false
 			}
 			return fb, true

@@ -726,9 +726,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		keyScope = &pool.KeyScope{Allowed: h.cfg.Keys.AllowedUIDs(k.ID)}
 		st.keyName = k.Name // 单条明细：业务 Key 名
 	}
-	// nextFallbackModel 模型回退链：仅当当前模型已被域内所有可用账号拒绝
-	// （ModelGoneRealm）时放行下一个白名单候选；触发条件不成立即终止回退
-	// （账号全冷却等场景应等冷却而非悄悄换便宜模型）。每请求独立游标。
+	// nextFallbackModel 模型回退链：当前模型在域内已无任何账号能立即服务
+	// （ModelGoneRealm：6004/11102/403 模型冷却或账号冷却）时放行下一个白名单
+	// 候选；仍有健康候选则终止回退（轮换继续试原模型）。每请求独立游标。
 	fbIdx := 0
 	// 回退候选序列：Key 配置了模型白名单 → 按其优先级降序（限内回退）；
 	// 未配置 → 全局 model_fallback 白名单。
@@ -743,7 +743,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			if fb == "" || fb == current {
 				continue
 			}
-			if !h.cfg.Pool.ModelGoneRealm(realm, current) {
+			if !h.cfg.Pool.ModelGoneRealm(realm, current, keyScope) {
 				return "", false
 			}
 			return fb, true
@@ -777,8 +777,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			acct = h.cfg.Pool.PickForKey(tried, bareModel, pickRealm, keyScope)
 		}
 		if acct == nil {
-			// 模型级故障转移：主模型已被域内所有可用账号拒绝（11102/403 负缓存）
-			// 且账号本身健康时，按白名单切到便宜模型重试（换模型不消耗轮换名额）。
+			// 模型级故障转移：主模型在域内已无账号能立即服务（6004/11102/403
+			// 模型冷却或账号冷却）时，按白名单切到便宜模型重试（不消耗轮换名额）。
 			if fb, ok := nextFallbackModel(pickRealm, bareModel); ok {
 				body = rewriteModel(body, fb)
 				bareModel = fb

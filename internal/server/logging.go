@@ -49,6 +49,7 @@ type chatStat struct {
 	keyName   string // 业务 Key 名（多 Key 模式；旧单 Key 模式为空）
 	tries     int    // 轮转尝试次数（真正出站的尝试，Acquire 竞态失败不计）
 	respModel string // 上游响应回传的实际模型（auto 档可见真实路由；失败尝试为空）
+	reqModel  string // 原始请求模型名（客户端发来的名字；改路由/回退不覆盖——溯源用）
 
 	logged bool
 }
@@ -59,7 +60,7 @@ func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	return &chatStat{start: now, model: parseModelFromBody(body), reqModel: parseModelFromBody(body), mode: mode, toks: -1}
 }
 
 // done 幂等落一行表格日志。

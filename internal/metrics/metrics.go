@@ -41,6 +41,8 @@ type Observe struct {
 	Tries   int
 	// RespModel 上游响应回传的实际模型（auto 档路由结果；失败尝试/无帧为空）。
 	RespModel string
+	// ReqModel 原始请求模型名（客户端发来的名字；与最终服务模型可能不同）。
+	ReqModel string
 }
 
 // ModelAccum 单模型累计量（落盘形态，只存和与计数；派生值在 Snapshot 时算）。
@@ -123,6 +125,8 @@ type RequestRecord struct {
 	Tries   int    `json:"tries,omitempty"`
 	// RespModel 上游响应回传的实际模型（auto 档可见真实路由；旧记录缺失）。
 	RespModel string `json:"resp_model,omitempty"`
+	// ReqModel 原始请求模型名（客户端发来的名字；旧记录缺失）。
+	ReqModel string `json:"req_model,omitempty"`
 }
 
 // Stats /v1/stats 响应体（对应面板 client.go Stats）。Models 空时为 [] 非 nil

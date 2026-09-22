@@ -435,6 +435,8 @@ type RequestRecord struct {
 	Tries     int    `json:"tries,omitempty"`
 	// RespModel 上游响应回传的实际模型（auto 档可见真实路由）。
 	RespModel string `json:"resp_model,omitempty"`
+	// ReqModel 原始请求模型名（客户端发来的名字）。
+	ReqModel string `json:"req_model,omitempty"`
 }
 
 // Stats 拉取按模型聚合的请求统计。

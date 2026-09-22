@@ -81,7 +81,8 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	st := newChatStat(time.Now(), body, req.Stream)
-	st.proto = "anthropic" // 单条明细协议来源
+	st.proto = "anthropic"  // 单条明细协议来源
+	st.reqModel = req.Model // 原始请求模型名（body 已是翻译后的 OpenAI 形态，parse 不到原始名）
 	defer st.done()
 	servedModel := bareModel // 实际服务模型（模型回退后变化；出口按它记录明细/统计）
 	defer func() { h.observeMetrics(st, servedModel, req.Stream) }()
@@ -143,22 +144,20 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 		body = rewriteModel(body, bareModel)
 	}
 
-	// Key 模型限制与优先级（与 chatCompletions 同构）：白名单外请求改路由到
-	// 优先级最高的允许模型；白名单决定该 Key 的回退顺序。
+	// Key 模型白名单 = 自动路由范围（与 chatCompletions 同构）：仅约束 auto 档
+	// 请求与回退序列；用户主动指定的模型原样透传，不受白名单限制。
 	var keyModelSeq []string
 	if k := handlerKey(r); k != nil && len(k.Models) > 0 {
 		for _, m := range k.ModelsSorted() {
 			keyModelSeq = append(keyModelSeq, m.Name)
 		}
-		if !k.ContainsModel(bareModel) && len(keyModelSeq) > 0 {
-			if m0 := keyModelSeq[0]; m0 != bareModel {
-				body = rewriteModel(body, m0)
-				bareModel = m0
-				servedModel = m0
-				st.model = m0
-				log.Printf("WARN: [server] key model restriction: model %q not allowed for key %q -> rerouted to %q",
-					bareModel, k.Name, m0)
-			}
+		if bareModel == "auto" && keyModelSeq[0] != "auto" {
+			body = rewriteModel(body, keyModelSeq[0])
+			bareModel = keyModelSeq[0]
+			servedModel = keyModelSeq[0]
+			st.model = keyModelSeq[0]
+			log.Printf("INFO: [server] key auto-routing: model %q -> %q (key %q whitelist top)",
+				"auto", keyModelSeq[0], k.Name)
 		}
 	}
 
@@ -444,6 +443,14 @@ func (h *Handler) resolveAnthropicModel(model string) string {
 	}
 	for _, m := range staticModels {
 		if id, ok := m["id"].(string); ok && id == model {
+			return "cn:" + model
+		}
+	}
+	// 动态模型识别：上游模型列表里的新模型（glm-5.3-flash 等静态表没有的名字）
+	// 同样允许客户端点名——否则会被误映射到 default_model(auto)，用户在客户端
+	// 显式选择的网关模型名根本不生效（实测踩坑）。
+	for _, mi := range h.fetchDynamicModels() {
+		if mi.ID == model {
 			return "cn:" + model
 		}
 	}

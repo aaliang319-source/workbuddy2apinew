@@ -281,6 +281,9 @@ export default function Requests({ session: _session }: { session: SessionInfo }
                       >
                         <td className="mono text-faint" title={fmtFull(r.time)}>{fmtClock(r.time)}</td>
                         <td className="mono">
+                      {r.req_model && r.req_model !== r.model && (
+                        <span className="text-dim" style={{ fontSize: 11 }}>{r.req_model} → </span>
+                      )}
                       {r.model}
                       {r.resp_model && r.resp_model !== r.model && (
                         <span className="text-dim" style={{ fontSize: 11 }}> → {r.resp_model}</span>

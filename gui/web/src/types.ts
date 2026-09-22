@@ -325,6 +325,8 @@ export interface RequestRecord {
   tries?: number
   /** 上游响应回传的实际模型（auto 档可见真实路由）；旧记录缺失 */
   resp_model?: string
+  /** 原始请求模型名（客户端发来的名字；旧记录缺失） */
+  req_model?: string
 }
 
 /** 网关 /v1/stats 响应。 */

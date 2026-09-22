@@ -200,13 +200,51 @@ func restrictedFixture(t *testing.T) (*pool.Pool, *Handler, *[]byte, string) {
 
 func TestKeyModelRestrictionReroutes(t *testing.T) {
 	_, h, captured, kv := restrictedFixture(t)
-	// 请求白名单外的模型 → 自动改路由到优先级最高的 deepseek。
-	rec := postChat(h, kv, "whatever-model")
+	// auto 档请求 → 自动路由到优先级最高的白名单模型（deepseek）。
+	rec := postChat(h, kv, "auto")
 	if rec.Code != 200 {
 		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	if !strings.Contains(string(*captured), `"model":"deepseek-v4.1-flash"`) {
-		t.Fatalf("should reroute to top-priority allowed model: %s", *captured)
+		t.Fatalf("auto should route to whitelist top: %s", *captured)
+	}
+}
+
+func TestKeyModelExplicitPassesThrough(t *testing.T) {
+	// 新语义：主动指定的模型（即使不在白名单）原样透传，不受限制。
+	// 夹具全 200：显式模型应原样到达上游（不被改路由到白名单）。
+	auth.SetGlobalEnabled(true)
+	cn := &auth.Auth{UID: "ep-cn-1", AccessToken: "at-1", ExpiresAt: 9999999999, Domain: "www.codebuddy.cn"}
+	p := testPoolWith(cn)
+	st, _ := keys.Load(filepath.Join(t.TempDir(), "keys.json"), "")
+	k, _ := st.Create("ep")
+	_, _ = st.Update(k.ID, func(x *keys.Key) error {
+		x.Associations = []keys.Association{{UID: cn.UID, Priority: 1, Enabled: true}}
+		x.Models = []keys.KeyModel{{Name: "deepseek-v4.1-flash", Priority: 100}}
+		return nil
+	})
+	var captured []byte
+	up := newCapturingUpstream(t, &captured, func(string) (int, string, bool) { return 200, sseOK, true })
+	h := NewHandler(Config{Pool: p, Upstream: up, Keys: st, AdminKey: "adm", MaxBodyBytes: 1 << 20})
+	rec := postChat(h, k.Value, "expensive-model")
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(string(captured), `"model":"expensive-model"`) {
+		t.Fatalf("explicit model must pass through untouched: %s", captured)
+	}
+}
+
+func TestKeyModelExplicitFallbackToWhitelist(t *testing.T) {
+	// 显式模型不可用（11102）→ 回退到白名单内优先级最高的可用模型。
+	_, h, captured, kv := restrictedFixture(t)
+	rec := postChat(h, kv, "expensive-model")
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// captured 是最后一次尝试：显式模型 11102 后回退 deepseek 服务。
+	if !strings.Contains(string(*captured), `"model":"deepseek-v4.1-flash"`) {
+		t.Fatalf("should fall back to whitelist top after explicit model failed: %s", *captured)
 	}
 }
 

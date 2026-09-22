@@ -675,23 +675,21 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		body = rewriteModel(body, bareModel)
 	}
 
-	// Key 模型限制与优先级：Key 配置了模型白名单时，请求模型不在白名单内
-	// → 改路由到优先级最高的允许模型（真正的"限制"）；白名单同时决定该 Key
-	// 的回退顺序（见 nextFallbackModel）。未配置 = 不限制。
+	// Key 模型白名单 = 自动路由范围（成本/防风控控制）：仅约束 auto 档请求
+	// （改路由到优先级最高的白名单模型）与模型不可用时的回退序列（见
+	// nextFallbackModel）。用户主动指定的模型（任何名字）原样透传，不受白名单限制。
 	var keyModelSeq []string
 	if k := handlerKey(r); k != nil && len(k.Models) > 0 {
 		for _, m := range k.ModelsSorted() {
 			keyModelSeq = append(keyModelSeq, m.Name)
 		}
-		if !k.ContainsModel(bareModel) && len(keyModelSeq) > 0 {
-			if m0 := keyModelSeq[0]; m0 != bareModel {
-				body = rewriteModel(body, m0)
-				bareModel = m0
-				servedModel = m0
-				st.model = m0
-				log.Printf("WARN: [server] key model restriction: model %q not allowed for key %q -> rerouted to %q",
-					bareModel, k.Name, m0)
-			}
+		if bareModel == "auto" && keyModelSeq[0] != "auto" {
+			body = rewriteModel(body, keyModelSeq[0])
+			bareModel = keyModelSeq[0]
+			servedModel = keyModelSeq[0]
+			st.model = keyModelSeq[0]
+			log.Printf("INFO: [server] key auto-routing: model %q -> %q (key %q whitelist top)",
+				"auto", keyModelSeq[0], k.Name)
 		}
 	}
 

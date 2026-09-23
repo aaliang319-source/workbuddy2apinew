@@ -23,6 +23,25 @@ const toolSSE = "data: {\"id\":\"chatcmpl-9\",\"object\":\"chat.completion.chunk
 	"data: {\"id\":\"chatcmpl-9\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n" +
 	"data: [DONE]\n\n"
 
+// sseCacheUsage 带缓存观测的上游 SSE：末帧 usage 含 prompt_cache_* 三元组
+// （prompt=1000 = 命中 700 + 普通输入 200 + 写入 100，miss=300=200+100）。
+const sseCacheUsage = "data: {\"id\":\"chatcmpl-10\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"好\"}}]}\n\n" +
+	"data: {\"id\":\"chatcmpl-10\",\"object\":\"chat.completion.chunk\",\"created\":1753600000,\"model\":\"glm-5.3\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":50,\"total_tokens\":1050,\"prompt_cache_hit_tokens\":700,\"prompt_cache_miss_tokens\":300,\"prompt_cache_write_tokens\":100}}\n\n" +
+	"data: [DONE]\n\n"
+
+// sseDataAfter 提取 event 行之后的第一条 data JSON（Anthropic SSE 断言辅助）。
+func sseDataAfter(t *testing.T, body, event string) string {
+	t.Helper()
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) == event && i+1 < len(lines) {
+			return strings.TrimPrefix(strings.TrimSpace(lines[i+1]), "data: ")
+		}
+	}
+	t.Fatalf("event %q not found; body=\n%s", event, body)
+	return ""
+}
+
 // newMessagesHandler 构建带 Anthropic 模型映射的测试 handler（默认不鉴权）。
 func newMessagesHandler(t *testing.T, up *upstream.Client, auths ...*auth.Auth) *Handler {
 	t.Helper()
@@ -65,6 +84,64 @@ func newCapturingUpstream(t *testing.T, captured *[]byte, behavior func(authz st
 		})},
 		ChatBaseCN:    "https://fake.example",
 		BillingBaseCN: "https://fake.example",
+	}
+}
+
+// TestMessagesStreamUsageCarriesContext 流式：message_delta 必须携带上下文口径字段
+// ——input_tokens/cache_read/cache_creation/output_tokens（Claude Code 客户端在
+// message_delta 分支对这三字段做 !=null 覆盖合并，是面板"上下文占用"的唯一数据源；
+// message_start 时上游 usage 末帧未到，0 占位是官方行为）。cache 按 Anthropic
+// 字段名映射：cache_read_input_tokens / cache_creation_input_tokens。
+func TestMessagesStreamUsageCarriesContext(t *testing.T) {
+	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseCacheUsage, true })
+	h := newMessagesHandler(t, up, &auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	rec := postMessages(t, h, `{"model":"claude-sonnet-4-5","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"你好"}]}`)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+
+	var delta struct {
+		Usage struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(sseDataAfter(t, body, "event: message_delta")), &delta); err != nil {
+		t.Fatalf("message_delta unmarshal: %v", err)
+	}
+	u := delta.Usage
+	// input_tokens = 未命中输入（miss - write）：缓存部分走 cache_read，写入部分走 cache_creation。
+	if u.InputTokens != 200 || u.OutputTokens != 50 || u.CacheReadInputTokens != 700 || u.CacheCreationInputTokens != 100 {
+		t.Errorf("message_delta usage=%+v want in=200 out=50 read=700 creation=100", u)
+	}
+}
+
+// TestMessagesNonStreamUsageCarriesContext 非流式：usage 映射 Anthropic 全字段，
+// input_tokens = 普通输入，缓存命中/写入分列（口径与流式一致）。
+func TestMessagesNonStreamUsageCarriesContext(t *testing.T) {
+	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseCacheUsage, true })
+	h := newMessagesHandler(t, up, &auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999})
+	rec := postMessages(t, h, `{"model":"claude-sonnet-4-5","max_tokens":100,"messages":[{"role":"user","content":"你好"}]}`)
+	if rec.Code != 200 {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Usage struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, rec.Body.String())
+	}
+	if resp.Usage.InputTokens != 200 || resp.Usage.OutputTokens != 50 ||
+		resp.Usage.CacheReadInputTokens != 700 || resp.Usage.CacheCreationInputTokens != 100 {
+		t.Errorf("usage=%+v want in=200 out=50 read=700 creation=100", resp.Usage)
 	}
 }
 

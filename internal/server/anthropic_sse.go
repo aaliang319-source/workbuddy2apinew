@@ -6,7 +6,8 @@
 //	event: ping              （防中间缓冲，发一次即可）
 //	event: content_block_start / content_block_delta / content_block_stop
 //	                         （块 index 单调递增，start→delta*→stop 严格成对）
-//	event: message_delta     （stop_reason + usage.output_tokens）
+//	event: message_delta     （stop_reason + usage：output 恒有；input/cache_* 末帧
+//	                          usage 到达后一并带出——客户端上下文占用的数据源）
 //	event: message_stop      （流终结；缺它 Claude Code 会挂起重试）
 //
 // 每个事件写 "event: <type>\ndata: <json>\n\n" 并 flush；不写 OpenAI 的 [DONE]
@@ -62,20 +63,49 @@ func writeAnthropicError(w http.ResponseWriter, status int, msg string) {
 	})
 }
 
+// anthropicUsageSplit OpenAI usage 口径 → Anthropic usage 拆分，返回
+// (input_tokens, cache_read_input_tokens, cache_creation_input_tokens)。
+// Anthropic 口径里 input_tokens 不含缓存部分：缓存命中走 cache_read、新写入走
+// cache_creation，故 input = miss - write（纯新输入）。上游未开启缓存观测
+// （三元组全 0）时无法拆分，input 退化为 prompt 全量。output 由调用方取 completion_tokens。
+func anthropicUsageSplit(prompt, hit, miss, write int) (in, cacheRead, cacheCreate int) {
+	cacheRead, cacheCreate = hit, write
+	in = prompt
+	if hit > 0 || miss > 0 || write > 0 {
+		in = miss - write
+		if in < 0 {
+			in = 0
+		}
+	}
+	return
+}
+
+// usageInt 从 OpenAI usage map 取整数字段；缺失/类型不符返回 0。
+func usageInt(u map[string]any, key string) int {
+	v, _ := u[key].(float64)
+	return int(v)
+}
+
 // anthropicMessageFromOpenAI 把 upstream.Aggregate 输出的 OpenAI chat.completion map
 // 翻译为 Anthropic Message 对象（非流式路径）。映射：
 // reasoning_content→thinking 块（signature 置空串，D3）、content→text 块、
 // tool_calls[]→tool_use 块（arguments 反序列化为 input，失败回退 {}）、
-// finish_reason→stop_reason、usage 字段名换算。全空回复兜底单个空 text 块（D4，
-// 比 content:[] 兼容面广——部分客户端对空 content 数组直接崩）。
+// finish_reason→stop_reason、usage 字段名换算（含 cache 拆分，见 anthropicUsageSplit）。
+// 全空回复兜底单个空 text 块（D4，比 content:[] 兼容面广——部分客户端对空 content 数组直接崩）。
 func anthropicMessageFromOpenAI(resp map[string]any, requestModel string) map[string]any {
 	id, _ := resp["id"].(string)
 	id = strings.TrimPrefix(id, "chatcmpl-")
 	usage, _ := resp["usage"].(map[string]any)
-	var inToks, outToks float64
+	var outToks int
+	var inToks, cacheRead, cacheCreate int
 	if usage != nil {
-		inToks, _ = usage["prompt_tokens"].(float64)
-		outToks, _ = usage["completion_tokens"].(float64)
+		inToks, cacheRead, cacheCreate = anthropicUsageSplit(
+			usageInt(usage, "prompt_tokens"),
+			usageInt(usage, "prompt_cache_hit_tokens"),
+			usageInt(usage, "prompt_cache_miss_tokens"),
+			usageInt(usage, "prompt_cache_write_tokens"),
+		)
+		outToks = usageInt(usage, "completion_tokens")
 	}
 	stopReason := "end_turn"
 	var blocks []map[string]any
@@ -137,8 +167,10 @@ func anthropicMessageFromOpenAI(resp map[string]any, requestModel string) map[st
 		"stop_reason":   stopReason,
 		"stop_sequence": nil,
 		"usage": map[string]any{
-			"input_tokens":  int(inToks),
-			"output_tokens": int(outToks),
+			"input_tokens":                inToks,
+			"cache_read_input_tokens":     cacheRead,
+			"cache_creation_input_tokens": cacheCreate,
+			"output_tokens":               outToks,
 		},
 	}
 }
@@ -156,7 +188,14 @@ type anthropicStreamState struct {
 	toolSeen map[int]bool   // OpenAI tool_calls index → 已发 block_start
 	toolArgs map[int]string // OpenAI tool_calls index → 已发射的 arguments 片段（防首片空串）
 	outToks  int
-	stopped  bool // 已发 message_stop（幂等收尾）
+	// 上下文 usage（上游末帧才到，finish 时随 message_delta 一次性带给客户端）：
+	// input/cache_read/cache_creation 三字段是 Claude Code 等客户端计算上下文
+	// 占用的唯一来源，缺了面板就显示 0%。口径见 anthropicUsageSplit。
+	inToks      int
+	cacheRead   int
+	cacheCreate int
+	usageSeen   bool // 上游出现过 usage 帧（决定 message_delta 是否覆盖 input/cache 字段）
+	stopped     bool // 已发 message_stop（幂等收尾）
 }
 
 // writeEvent 写一个 SSE 事件（event: + data: 两行，Anthropic 客户端强依赖 event 行）。
@@ -189,7 +228,10 @@ func (s *anthropicStreamState) closeBlock() error {
 	return nil
 }
 
-// finish 收尾：关块 → message_delta（stop_reason + output_tokens）→ message_stop。
+// finish 收尾：关块 → message_delta（stop_reason + 完整 usage）→ message_stop。
+// usage 放 message_delta 而非 message_start：上游 usage 在末帧才到，且官方 SDK
+// 对 message_delta 里的 input/cache 字段按"整条消息累计总量"覆盖合并（缺失≠0，
+// 不覆盖）——这是客户端算上下文占用的数据来源。output_tokens 始终覆盖。
 // 幂等（stopped 标记）：调用方在正常流尾与空流兜底两条路径都会调。
 func (s *anthropicStreamState) finish(stopReason string) error {
 	if s.stopped {
@@ -199,10 +241,16 @@ func (s *anthropicStreamState) finish(stopReason string) error {
 	if err := s.closeBlock(); err != nil {
 		return err
 	}
+	deltaUsage := map[string]any{"output_tokens": s.outToks}
+	if s.usageSeen {
+		deltaUsage["input_tokens"] = s.inToks
+		deltaUsage["cache_read_input_tokens"] = s.cacheRead
+		deltaUsage["cache_creation_input_tokens"] = s.cacheCreate
+	}
 	if err := s.writeEvent("message_delta", map[string]any{
 		"type":  "message_delta",
 		"delta": map[string]any{"stop_reason": stopReason, "stop_sequence": nil},
-		"usage": map[string]any{"output_tokens": s.outToks},
+		"usage": deltaUsage,
 	}); err != nil {
 		return err
 	}
@@ -274,6 +322,10 @@ func anthropicStreamTransform(w http.ResponseWriter, r io.Reader, model string) 
 				Usage *struct {
 					CompletionTokens int `json:"completion_tokens"`
 					PromptTokens     int `json:"prompt_tokens"`
+					// prompt_cache_*：与 chatStatsReader 同源的缓存观测，缺失≠0。
+					PromptCacheHitTokens   *int `json:"prompt_cache_hit_tokens"`
+					PromptCacheMissTokens  *int `json:"prompt_cache_miss_tokens"`
+					PromptCacheWriteTokens *int `json:"prompt_cache_write_tokens"`
 				} `json:"usage"`
 			}
 			if json.Unmarshal([]byte(payload), &chunk) == nil {
@@ -328,6 +380,22 @@ func anthropicStreamTransform(w http.ResponseWriter, r io.Reader, model string) 
 				}
 				if chunk.Usage != nil {
 					s.outToks = chunk.Usage.CompletionTokens
+					// 上下文 usage：末帧才带全量，此处持续覆盖（口径同 chatStatsReader）。
+					s.usageSeen = true
+					hit := 0
+					if chunk.Usage.PromptCacheHitTokens != nil {
+						hit = *chunk.Usage.PromptCacheHitTokens
+					}
+					miss := 0
+					if chunk.Usage.PromptCacheMissTokens != nil {
+						miss = *chunk.Usage.PromptCacheMissTokens
+					}
+					write := 0
+					if chunk.Usage.PromptCacheWriteTokens != nil {
+						write = *chunk.Usage.PromptCacheWriteTokens
+					}
+					s.inToks, s.cacheRead, s.cacheCreate = anthropicUsageSplit(
+						chunk.Usage.PromptTokens, hit, miss, write)
 				}
 			}
 		}

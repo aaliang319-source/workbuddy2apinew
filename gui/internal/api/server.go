@@ -381,12 +381,25 @@ func (s *Server) handleLoginCancel(w http.ResponseWriter, r *http.Request) {
 // 模型 / 聊天
 // ---------------------------------------------------------------------------
 
-// handleStats 返回网关的按模型统计 + 官方价换算。
+// handleStats 返回网关的按模型统计 + 官方价换算 + 按账号积分消耗。
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	st, err := s.svc.Gateway().Stats(r.Context())
 	if err != nil {
 		writeError(w, err)
 		return
+	}
+	// 按账号消耗回填昵称：metrics 只记 uidPrefix（前 8 位），面板从账号合并视图
+	// 补全 nickname 供仪表盘直接展示。账号列表拉失败不阻塞统计（昵称留空）。
+	if views, _, _, err := s.svc.Accounts(r.Context()); err == nil {
+		nick := make(map[string]string, len(views))
+		for _, a := range views {
+			if len(a.UID) >= 8 {
+				nick[a.UID[:8]] = a.Nickname
+			}
+		}
+		for i := range st.Usage.Accounts {
+			st.Usage.Accounts[i].Nickname = nick[st.Usage.Accounts[i].UID]
+		}
 	}
 	// 官方价换算：把每个模型的 token 用量折成"走官方 API 要花多少钱"。
 	// mode 由前端传（peak/offpeak）—— DeepSeek 空闲价是高峰价的一半。

@@ -340,6 +340,37 @@ export interface Stats {
   models: ModelStat[] | null
   /** 单条请求明细（最近 200 条，新→旧） */
   recent?: RequestRecord[] | null
+  /** 按账号 × 按日的积分消耗（仪表盘「积分消耗」卡片）；旧网关版本缺失 */
+  usage?: UsageSnapshot
+}
+
+/** 单账号单日消耗（旧→新排列）。 */
+export interface UsageDay {
+  day: string
+  credit: number
+  requests: number
+}
+
+/** 单账号的积分消耗视图（UID 前 8 位口径，昵称由面板回填）。 */
+export interface AccountUsage {
+  uid: string
+  nickname?: string
+  today: number
+  yesterday: number
+  last_7d: number
+  total: number
+  requests: number
+  /** 近 7 天逐日（旧→新），供迷你趋势 */
+  daily?: UsageDay[]
+}
+
+/** 按账号积分消耗汇总。 */
+export interface UsageSnapshot {
+  accounts: AccountUsage[]
+  today: number
+  yesterday: number
+  last_7d: number
+  total: number
 }
 
 /** 单个模型的官方单价（元/百万 token）。 */

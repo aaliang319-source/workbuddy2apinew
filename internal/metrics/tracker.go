@@ -21,6 +21,11 @@ type Tracker struct {
 	models map[string]*ModelAccum
 	recent []RequestRecord // 单条请求明细，时间升序存放（尾部最新），cap recentCap
 
+	// usage 按账号 × 按日的积分消耗（uidPrefix → date → item{credit,requests}），
+	// 随 metrics.json 落盘。消耗为 0 的免费层请求也计请求数，保证"该号跑过"可见。
+	// 见 usage.go。
+	usage map[string]map[string]*accountUsageItem
+
 	stopCh    chan struct{}
 	closeOnce sync.Once
 
@@ -34,6 +39,7 @@ func New(filePath string) *Tracker {
 		file:   filePath,
 		since:  time.Now(),
 		models: map[string]*ModelAccum{},
+		usage:  map[string]map[string]*accountUsageItem{},
 	}
 	t.load()
 	if filePath != "" {
@@ -78,6 +84,7 @@ func (t *Tracker) Observe(o Observe) {
 		a.CreditSum += o.Credit
 	}
 	a.LastSeen = o.Now
+	t.recordUsage(o)
 	t.appendRecent(o)
 	t.dirty.Store(true)
 }
@@ -154,6 +161,7 @@ func (t *Tracker) Snapshot() Stats {
 	for i, r := range t.recent {
 		recent[len(t.recent)-1-i] = r
 	}
+	usage := t.usageSnapshot(now)
 	t.mu.RUnlock()
 
 	sortModels(models)
@@ -167,15 +175,17 @@ func (t *Tracker) Snapshot() Stats {
 		Total:     totStat,
 		Models:    models,
 		Recent:    recent,
+		Usage:     usage,
 	}
 }
 
 // Reset 清空全部累计并把 since 重置为当前时刻（面板"重置统计"语义：
-// 之后看到的是干净增量）。单条请求明细同属统计范畴，一并清空。
+// 之后看到的是干净增量）。单条请求明细与按账号消耗同属统计范畴，一并清空。
 func (t *Tracker) Reset() {
 	t.mu.Lock()
 	t.models = map[string]*ModelAccum{}
 	t.recent = nil
+	t.usage = map[string]map[string]*accountUsageItem{}
 	t.since = time.Now()
 	t.mu.Unlock()
 	t.dirty.Store(true)

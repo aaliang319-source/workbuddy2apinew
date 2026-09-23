@@ -1,13 +1,19 @@
-// Dashboard.tsx 仪表盘：账号池健康度、积分总览、异常提示。
+// Dashboard.tsx 仪表盘：账号池健康度、积分总览、异常提示、积分消耗。
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, ApiError } from '../api'
-import type { Account, Overview } from '../types'
+import type { Account, Overview, UsageSnapshot } from '../types'
 import { Alert, Badge, displayName, fmtDuration, fmtISO, fmtNum, Spinner, statusBadge } from '../ui'
+
+/** 消耗卡片的区间切换：今天 / 近 7 天 / 累计（昨日只出现在汇总指标块）。 */
+type UsageRange = 'today' | 'last7d' | 'total'
 
 export default function Dashboard() {
   const [ov, setOv] = useState<Overview | null>(null)
   const [accounts, setAccounts] = useState<Account[]>([])
+  const [usage, setUsage] = useState<UsageSnapshot | null>(null)
+  const [statsEnabled, setStatsEnabled] = useState(true)
+  const [usageRange, setUsageRange] = useState<UsageRange>('today')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null)
@@ -15,9 +21,14 @@ export default function Dashboard() {
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
-      const [o, a] = await Promise.all([api.overview(), api.accounts()])
+      const [o, a, st] = await Promise.all([api.overview(), api.accounts(), api.stats().catch(() => null)])
       setOv(o)
       setAccounts(a.accounts ?? [])
+      // 统计端点失败（网关旧版/统计关闭）不阻塞仪表盘其余部分。
+      if (st) {
+        setUsage(st.stats.usage ?? null)
+        setStatsEnabled(st.stats.enabled)
+      }
       setError(null)
       setRefreshedAt(new Date())
     } catch (err) {
@@ -127,6 +138,8 @@ export default function Dashboard() {
               tone={ov.expired > 0 ? 'warn' : undefined}
             />
           </div>
+
+          <UsageCard usage={usage} statsEnabled={statsEnabled} range={usageRange} onRange={setUsageRange} />
 
           <div className="grid grid-2">
             <div className="card">
@@ -279,6 +292,166 @@ function Stat({
       <div className="stat-label">{label}</div>
       <div className={`stat-value ${cls}`}>{value}</div>
       {sub && <div className="stat-sub">{sub}</div>}
+    </div>
+  )
+}
+
+/** 数值格式：小于 0.01 且非 0 显示科学计数以外的 4 位小数；一般保留 2 位。 */
+function fmtCredit(v: number): string {
+  if (v === 0) return '0'
+  if (Math.abs(v) < 0.01) return v.toFixed(4)
+  if (Math.abs(v) >= 10000) return fmtNum(Math.round(v))
+  return v.toFixed(2)
+}
+
+/**
+ * UsageCard 积分消耗卡片：汇总指标块（今日/昨日/近7天/累计）+ 按账号横向比例条。
+ *
+ * 设计取舍（dataviz 口径）：
+ *  - 单一度量（积分），无多序列 → 不需要图例；数值直接标在条尾；
+ *  - 条形单色（--accent），比例长度即大小，账号身份由行标签承载（颜色不编码身份）;
+ *  - 近 7 天模式附逐日迷你点列（旧→新），只示意趋势不画坐标轴。
+ */
+function UsageCard({
+  usage,
+  statsEnabled,
+  range,
+  onRange,
+}: {
+  usage: UsageSnapshot | null
+  statsEnabled: boolean
+  range: UsageRange
+  onRange: (r: UsageRange) => void
+}) {
+  if (!statsEnabled) {
+    return (
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div className="card-head">
+          <h2>积分消耗</h2>
+        </div>
+        <div className="empty">
+          统计未开启（config <span className="mono">server.metrics_enabled</span>），开启后此处展示每账号每日消耗。
+        </div>
+      </div>
+    )
+  }
+  if (!usage) return null
+
+  const accounts = usage.accounts ?? []
+  const summary =
+    range === 'today'
+      ? { label: '今日消耗', value: usage.today, cmp: usage.yesterday, cmpLabel: '昨日' }
+      : range === 'last7d'
+        ? { label: '近 7 天消耗', value: usage.last_7d, cmp: 0, cmpLabel: '' }
+        : { label: '累计消耗', value: usage.total, cmp: 0, cmpLabel: '' }
+  const keyOf: Record<UsageRange, 'today' | 'last7d' | 'total'> = { today: 'today', last7d: 'last7d', total: 'total' }
+  const metricOf = (u: UsageSnapshot['accounts'][number]) =>
+    keyOf[range] === 'today' ? u.today : keyOf[range] === 'last7d' ? u.last_7d : u.total
+
+  const rows = accounts.map((u) => ({ u, v: metricOf(u) }))
+  const max = Math.max(...rows.map((r) => r.v), 0)
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <div className="card-head">
+        <h2>积分消耗</h2>
+        <div style={{ display: 'flex', gap: 4 }}>
+          {(
+            [
+              ['today', '今天'],
+              ['last7d', '近 7 天'],
+              ['total', '累计'],
+            ] as [UsageRange, string][]
+          ).map(([r, label]) => (
+            <button
+              key={r}
+              className={`btn btn-sm${range === r ? ' btn-primary' : ''}`}
+              onClick={() => onRange(r)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-stats" style={{ marginBottom: 14 }}>
+        <Stat label="今日" value={fmtCredit(usage.today)} sub={usage.yesterday > 0 ? `昨日 ${fmtCredit(usage.yesterday)}` : undefined} />
+        <Stat label="近 7 天" value={fmtCredit(usage.last_7d)} sub={`日均 ${fmtCredit(usage.last_7d / 7)}`} />
+        <Stat label="累计" value={fmtCredit(usage.total)} sub={`保留 30 天口径`} />
+      </div>
+
+      {rows.length === 0 ? (
+        <div className="empty">还没有消耗记录 —— 发起一次对话后这里会出现按账号的消耗分布。</div>
+      ) : (
+        <div>
+          {rows.map(({ u, v }) => (
+            <div key={u.uid} style={{ marginBottom: 10 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                <span style={{ fontSize: 12.5 }}>
+                  {u.nickname || <span className="text-faint">未知账号</span>}
+                  <span className="mono text-faint" style={{ fontSize: 11, marginLeft: 6 }}>
+                    {u.uid}
+                  </span>
+                </span>
+                <span className="mono" style={{ fontSize: 12.5 }}>
+                  {fmtCredit(v)}
+                  <span className="text-faint" style={{ fontSize: 11, marginLeft: 6 }}>
+                    {u.requests} 次请求
+                  </span>
+                </span>
+              </div>
+              <div
+                style={{
+                  height: 8,
+                  borderRadius: 4,
+                  background: 'var(--bg-subtle, rgba(128,128,128,.15))',
+                  overflow: 'hidden',
+                }}
+              >
+                {v > 0 && (
+                  <div
+                    style={{
+                      width: `${max > 0 ? (v / max) * 100 : 0}%`,
+                      height: '100%',
+                      borderRadius: 4,
+                      background: 'var(--accent)',
+                    }}
+                  />
+                )}
+              </div>
+              {range === 'last7d' && u.daily && (
+                <div style={{ display: 'flex', gap: 3, marginTop: 3, alignItems: 'flex-end' }}>
+                  {u.daily.map((d) => {
+                    const dmax = Math.max(...u.daily!.map((x) => x.credit), 0.0001)
+                    const h = d.credit > 0 ? Math.max(4, (d.credit / dmax) * 16) : 2
+                    return (
+                      <div
+                        key={d.day}
+                        title={`${d.day}: ${fmtCredit(d.credit)}（${d.requests} 次请求）`}
+                        style={{
+                          width: 10,
+                          height: h,
+                          borderRadius: 2,
+                          background: d.credit > 0 ? 'var(--accent)' : 'var(--bg-subtle, rgba(128,128,128,.25))',
+                          opacity: d.credit > 0 ? 1 : 0.5,
+                        }}
+                      />
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          ))}
+          <div className="desc" style={{ marginTop: 8 }}>
+            {summary.cmp > 0 && (
+              <span>
+                {summary.cmpLabel}同期 {fmtCredit(summary.cmp)} ·{' '}
+              </span>
+            )}
+            排名按当前区间消耗降序；条长为区间内占比（相对最大者）。
+          </div>
+        </div>
+      )}
     </div>
   )
 }

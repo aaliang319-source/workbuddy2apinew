@@ -402,14 +402,44 @@ type ModelStat struct {
 
 // Stats 网关 /v1/stats 响应。
 type Stats struct {
-	Enabled   bool        `json:"enabled"`
-	Message   string      `json:"message,omitempty"`
-	Since     time.Time   `json:"since"`
-	Now       time.Time   `json:"now"`
-	UptimeSec int64       `json:"uptime_sec"`
-	Total     ModelStat   `json:"total"`
-	Models    []ModelStat `json:"models"`
+	Enabled   bool          `json:"enabled"`
+	Message   string        `json:"message,omitempty"`
+	Since     time.Time     `json:"since"`
+	Now       time.Time     `json:"now"`
+	UptimeSec int64         `json:"uptime_sec"`
+	Total     ModelStat     `json:"total"`
+	Models    []ModelStat   `json:"models"`
 	Recent    []RequestRecord `json:"recent,omitempty"`
+	// Usage 按账号 × 按日的积分消耗（仪表盘「积分消耗」卡片数据源）。
+	Usage UsageSnapshot `json:"usage"`
+}
+
+// UsageSnapshot 按账号的积分消耗汇总（镜像网关 metrics.UsageSnapshot）。
+type UsageSnapshot struct {
+	Accounts  []AccountUsage `json:"accounts"`
+	Today     float64        `json:"today"`
+	Yesterday float64        `json:"yesterday"`
+	Last7d    float64        `json:"last_7d"`
+	Total     float64        `json:"total"`
+}
+
+// AccountUsage 单账号积分消耗（镜像网关 metrics.AccountUsage；前 8 位 UID 口径）。
+type AccountUsage struct {
+	UID       string     `json:"uid"`
+	Nickname  string     `json:"nickname,omitempty"`
+	Today     float64    `json:"today"`
+	Yesterday float64    `json:"yesterday"`
+	Last7d    float64    `json:"last_7d"`
+	Total     float64    `json:"total"`
+	Requests  int64      `json:"requests"`
+	Daily     []UsageDay `json:"daily,omitempty"`
+}
+
+// UsageDay 单日消耗（旧→新）。
+type UsageDay struct {
+	Day      string  `json:"day"`
+	Credit   float64 `json:"credit"`
+	Requests int64   `json:"requests"`
 }
 
 // RequestRecord 单条请求明细（网关 metrics.RequestRecord 的镜像，

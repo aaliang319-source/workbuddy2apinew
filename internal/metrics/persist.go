@@ -10,22 +10,24 @@ import (
 	"time"
 )
 
-// metricsVersion 落盘 schema 版本。v2：新增 Recent 单条请求明细（per-request 环形缓冲）；
-// v1 → v2 迁移策略：v1 文件容忍加载（聚合历史保留，Recent 为空，逐步回填）。
-const metricsVersion = 2
+// metricsVersion 落盘 schema 版本。v3：新增 Usage 按账号 × 按日积分消耗；
+// v2：新增 Recent 单条请求明细（per-request 环形缓冲）。
+// 旧版本文件容忍加载：v1/v2 的 Usage 为空（从加载时刻起逐步回填）。
+const metricsVersion = 3
 
 var flushInterval = 5 * time.Second
 
 // persistLogEvery 连续落盘失败每 N 次复报一条（flusher 5s 一把），避免刷屏。
 const persistLogEvery = 100
 
-// metricsFile 落盘形态：只有和与计数（ModelAccum）+ 最近请求明细（Recent），
-// 派生值不落盘。
+// metricsFile 落盘形态：只有和与计数（ModelAccum）+ 最近请求明细（Recent）+
+// 按账号×按日消耗（Usage），派生值不落盘。
 type metricsFile struct {
-	Version int                   `json:"version"`
-	Since   time.Time             `json:"since"`
-	Models  map[string]ModelAccum `json:"models"`
-	Recent  []RequestRecord       `json:"recent,omitempty"`
+	Version int                                      `json:"version"`
+	Since   time.Time                                `json:"since"`
+	Models  map[string]ModelAccum                    `json:"models"`
+	Recent  []RequestRecord                          `json:"recent,omitempty"`
+	Usage   map[string]map[string]*accountUsageItem  `json:"usage,omitempty"`
 }
 
 // startFlusher 启动后台周期落盘 goroutine（每 flushInterval 检查 dirty），
@@ -87,6 +89,11 @@ func (t *Tracker) load() {
 		mf.Recent = mf.Recent[len(mf.Recent)-recentCap:]
 	}
 	t.recent = mf.Recent
+	// v1/v2 文件无 Usage（nil），零值加载即正确；v3 恢复并按保留期裁剪。
+	if mf.Usage != nil {
+		t.usage = mf.Usage
+		pruneUsageLocked(t.usage, time.Now())
+	}
 }
 
 // saveLocked 原子落盘（tmp + rename）。调用方必须已持 t.mu。
@@ -94,7 +101,7 @@ func (t *Tracker) saveLocked() {
 	if t.file == "" {
 		return
 	}
-	mf := metricsFile{Version: metricsVersion, Since: t.since, Models: map[string]ModelAccum{}, Recent: t.recent}
+	mf := metricsFile{Version: metricsVersion, Since: t.since, Models: map[string]ModelAccum{}, Recent: t.recent, Usage: t.usage}
 	for m, a := range t.models {
 		mf.Models[m] = *a
 	}

@@ -141,4 +141,7 @@ type Stats struct {
 	Models    []ModelStat `json:"models"`
 	// Recent 单条请求明细（最近 recentCap 条，新→旧）；统计关闭/被 Reset 后为 nil。
 	Recent []RequestRecord `json:"recent,omitempty"`
+	// Usage 按账号 × 按日的积分消耗（仪表盘「积分消耗」卡片数据源）；
+	// 从未观测到消耗时 Accounts 为空数组。
+	Usage UsageSnapshot `json:"usage"`
 }

@@ -180,6 +180,7 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	var keyScope *pool.KeyScope
 	if k := handlerKey(r); k != nil {
 		keyScope = &pool.KeyScope{Allowed: h.cfg.Keys.AllowedUIDs(k.ID)}
+		st.keyName = k.Name // 单条明细：业务 Key 名（与 chatCompletions 同口径）
 	}
 	// nextFallbackModel 模型回退链（与 chatCompletions 同构；6004/11102/403/账号冷却均计入"无账号可服务"）。
 	fbIdx := 0

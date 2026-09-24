@@ -5,9 +5,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/keys"
+	"workbuddy2api/internal/metrics"
 	"workbuddy2api/internal/pool"
 )
 
@@ -120,5 +123,47 @@ func TestAdminAuthRejectsBusinessKey(t *testing.T) {
 	rec, _ = probe(h, map[string]string{"Authorization": "Bearer legacy-admin-key"}, "/admin/keys")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin key on admin: want 200, got %d", rec.Code)
+	}
+}
+
+// TestMessagesRequestDetailCarriesKeyName 回归：/v1/messages 出口明细必须带
+// 业务 Key 名。曾因 messages handler 只取 keyScope、漏赋 st.keyName，导致
+// 面板「请求明细」KEY 列对 anthropic 协议恒为空（openai 路径正常）。
+func TestMessagesRequestDetailCarriesKeyName(t *testing.T) {
+	st, err := keys.Load(filepath.Join(t.TempDir(), "keys.json"), "legacy-admin-key")
+	if err != nil {
+		t.Fatalf("load keys: %v", err)
+	}
+	tracker := metrics.New("")
+	defer tracker.Close()
+	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })
+	h := NewHandler(Config{
+		Pool:                  testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:              up,
+		MaxBodyBytes:          1 << 20,
+		APIKey:                "legacy-admin-key",
+		Keys:                  st,
+		AnthropicDefaultModel: "cn:auto",
+		Metrics:               tracker,
+	})
+
+	// 用迁移 default Key（wildcard，无需关联）发起 /v1/messages 请求。
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages",
+		strings.NewReader(`{"model":"claude-sonnet-4-5","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer legacy-admin-key")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("/v1/messages: want 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// 出口明细：key_name 必须是命中的业务 Key 名（default）。
+	snap := tracker.Snapshot()
+	if len(snap.Recent) == 0 {
+		t.Fatal("no request record observed")
+	}
+	if got := snap.Recent[0].KeyName; got != "default" {
+		t.Fatalf("recent[0].key_name = %q, want %q", got, "default")
 	}
 }

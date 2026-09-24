@@ -21,10 +21,10 @@ type Tracker struct {
 	models map[string]*ModelAccum
 	recent []RequestRecord // 单条请求明细，时间升序存放（尾部最新），cap recentCap
 
-	// usage 按账号 × 按日的积分消耗（uidPrefix → date → item{credit,requests}），
-	// 随 metrics.json 落盘。消耗为 0 的免费层请求也计请求数，保证"该号跑过"可见。
-	// 见 usage.go。
-	usage map[string]map[string]*accountUsageItem
+	// usage 按账号 × 模型 × 按日的积分/token 消耗
+	// （uidPrefix → date → model → item），随 metrics.json 落盘。
+	// 消耗为 0 的免费层请求也计请求数与 token，保证"该号跑过"可见。见 usage.go。
+	usage map[string]map[string]map[string]*usageItem
 
 	stopCh    chan struct{}
 	closeOnce sync.Once
@@ -39,7 +39,7 @@ func New(filePath string) *Tracker {
 		file:   filePath,
 		since:  time.Now(),
 		models: map[string]*ModelAccum{},
-		usage:  map[string]map[string]*accountUsageItem{},
+		usage:  map[string]map[string]map[string]*usageItem{},
 	}
 	t.load()
 	if filePath != "" {
@@ -185,7 +185,7 @@ func (t *Tracker) Reset() {
 	t.mu.Lock()
 	t.models = map[string]*ModelAccum{}
 	t.recent = nil
-	t.usage = map[string]map[string]*accountUsageItem{}
+	t.usage = map[string]map[string]map[string]*usageItem{}
 	t.since = time.Now()
 	t.mu.Unlock()
 	t.dirty.Store(true)

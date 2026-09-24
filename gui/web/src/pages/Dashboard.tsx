@@ -1,19 +1,19 @@
 // Dashboard.tsx 仪表盘：账号池健康度、积分总览、异常提示、积分消耗。
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, ApiError } from '../api'
-import type { Account, Overview, UsageSnapshot } from '../types'
+import type { Account, AccountUsage, Overview, UsageRange, UsageSnapshot } from '../types'
 import { Alert, Badge, displayName, fmtDuration, fmtISO, fmtNum, Spinner, statusBadge } from '../ui'
-
-/** 消耗卡片的区间切换：今天 / 近 7 天 / 累计（昨日只出现在汇总指标块）。 */
-type UsageRange = 'today' | 'last7d' | 'total'
+import UsageDetailDialog from './UsageDetailDialog'
 
 export default function Dashboard() {
   const [ov, setOv] = useState<Overview | null>(null)
   const [accounts, setAccounts] = useState<Account[]>([])
   const [usage, setUsage] = useState<UsageSnapshot | null>(null)
+  const [accountCosts, setAccountCosts] = useState<Record<string, number>>({})
   const [statsEnabled, setStatsEnabled] = useState(true)
   const [usageRange, setUsageRange] = useState<UsageRange>('today')
+  const [detail, setDetail] = useState<AccountUsage | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null)
@@ -27,6 +27,7 @@ export default function Dashboard() {
       // 统计端点失败（网关旧版/统计关闭）不阻塞仪表盘其余部分。
       if (st) {
         setUsage(st.stats.usage ?? null)
+        setAccountCosts((st as { account_costs?: Record<string, number> }).account_costs ?? {})
         setStatsEnabled(st.stats.enabled)
       }
       setError(null)
@@ -139,7 +140,13 @@ export default function Dashboard() {
             />
           </div>
 
-          <UsageCard usage={usage} statsEnabled={statsEnabled} range={usageRange} onRange={setUsageRange} />
+          <UsageCard
+            usage={usage}
+            statsEnabled={statsEnabled}
+            range={usageRange}
+            onRange={setUsageRange}
+            onOpenDetail={setDetail}
+          />
 
           <div className="grid grid-2">
             <div className="card">
@@ -271,6 +278,15 @@ export default function Dashboard() {
           </div>
         </>
       )}
+
+      {detail && (
+        <UsageDetailDialog
+          account={detail}
+          range={usageRange}
+          officialCost={accountCosts[detail.uid]}
+          onClose={() => setDetail(null)}
+        />
+      )}
     </>
   )
 }
@@ -305,24 +321,29 @@ function fmtCredit(v: number): string {
 }
 
 /**
- * UsageCard 积分消耗卡片：汇总指标块（今日/昨日/近7天/累计）+ 按账号横向比例条。
+ * UsageCard 积分消耗卡片：30 天趋势图 + 汇总指标块 + 按账号横向比例条（可点开详情）。
  *
  * 设计取舍（dataviz 口径）：
- *  - 单一度量（积分），无多序列 → 不需要图例；数值直接标在条尾；
- *  - 条形单色（--accent），比例长度即大小，账号身份由行标签承载（颜色不编码身份）;
- *  - 近 7 天模式附逐日迷你点列（旧→新），只示意趋势不画坐标轴。
+ *  - 单一度量（积分），无多序列 → 不需要图例；数值直接标注，颜色不编码身份；
+ *  - 趋势图一天一根柱（单色）、悬停显示当天数值；不画坐标轴，峰值由柱高承载；
+ *  - 账号横条单色（--accent），条长 = 区间内占比（相对最大者），点击开详情弹窗。
  */
 function UsageCard({
   usage,
   statsEnabled,
   range,
   onRange,
+  onOpenDetail,
 }: {
   usage: UsageSnapshot | null
   statsEnabled: boolean
   range: UsageRange
   onRange: (r: UsageRange) => void
+  onOpenDetail: (u: AccountUsage) => void
 }) {
+  // 趋势图数据（无数据时给空数组，hooks 不能条件调用）。
+  const trend = useMemo(() => usage?.daily ?? [], [usage])
+
   if (!statsEnabled) {
     return (
       <div className="card" style={{ marginBottom: 16 }}>
@@ -338,18 +359,13 @@ function UsageCard({
   if (!usage) return null
 
   const accounts = usage.accounts ?? []
-  const summary =
-    range === 'today'
-      ? { label: '今日消耗', value: usage.today, cmp: usage.yesterday, cmpLabel: '昨日' }
-      : range === 'last7d'
-        ? { label: '近 7 天消耗', value: usage.last_7d, cmp: 0, cmpLabel: '' }
-        : { label: '累计消耗', value: usage.total, cmp: 0, cmpLabel: '' }
   const keyOf: Record<UsageRange, 'today' | 'last7d' | 'total'> = { today: 'today', last7d: 'last7d', total: 'total' }
-  const metricOf = (u: UsageSnapshot['accounts'][number]) =>
+  const metricOf = (u: AccountUsage) =>
     keyOf[range] === 'today' ? u.today : keyOf[range] === 'last7d' ? u.last_7d : u.total
 
   const rows = accounts.map((u) => ({ u, v: metricOf(u) }))
   const max = Math.max(...rows.map((r) => r.v), 0)
+  const trendMax = Math.max(...trend.map((d) => d.credit), 0)
 
   return (
     <div className="card" style={{ marginBottom: 16 }}>
@@ -380,6 +396,37 @@ function UsageCard({
         <Stat label="累计" value={fmtCredit(usage.total)} sub={`保留 30 天口径`} />
       </div>
 
+      {trendMax > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <div className="desc" style={{ marginBottom: 6 }}>
+            近 30 天消耗趋势（悬停看当日数值）
+          </div>
+          <div style={{ display: 'flex', gap: 2, alignItems: 'flex-end', height: 48 }}>
+            {trend.map((d) => {
+              const h = d.credit > 0 ? Math.max(3, (d.credit / trendMax) * 44) : 2
+              return (
+                <div
+                  key={d.day}
+                  title={`${d.day}：${fmtCredit(d.credit)}（${d.requests} 次请求）`}
+                  style={{
+                    flex: 1,
+                    height: h,
+                    borderRadius: 2,
+                    background: d.credit > 0 ? 'var(--accent)' : 'var(--bg-subtle, rgba(128,128,128,.2))',
+                    opacity: d.credit > 0 ? 1 : 0.4,
+                    minWidth: 2,
+                  }}
+                />
+              )
+            })}
+          </div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+            <span className="text-faint" style={{ fontSize: 11 }}>{trend[0]?.day}</span>
+            <span className="text-faint" style={{ fontSize: 11 }}>{trend[trend.length - 1]?.day}</span>
+          </div>
+        </div>
+      )}
+
       {rows.length === 0 ? (
         <div className="empty">还没有消耗记录 —— 发起一次对话后这里会出现按账号的消耗分布。</div>
       ) : (
@@ -396,8 +443,15 @@ function UsageCard({
                 <span className="mono" style={{ fontSize: 12.5 }}>
                   {fmtCredit(v)}
                   <span className="text-faint" style={{ fontSize: 11, marginLeft: 6 }}>
-                    {u.requests} 次请求
+                    {u.requests} 次
                   </span>
+                  <button
+                    className="btn btn-sm"
+                    style={{ marginLeft: 8, padding: '1px 6px', fontSize: 11 }}
+                    onClick={() => onOpenDetail(u)}
+                  >
+                    详情
+                  </button>
                 </span>
               </div>
               <div
@@ -419,36 +473,10 @@ function UsageCard({
                   />
                 )}
               </div>
-              {range === 'last7d' && u.daily && (
-                <div style={{ display: 'flex', gap: 3, marginTop: 3, alignItems: 'flex-end' }}>
-                  {u.daily.map((d) => {
-                    const dmax = Math.max(...u.daily!.map((x) => x.credit), 0.0001)
-                    const h = d.credit > 0 ? Math.max(4, (d.credit / dmax) * 16) : 2
-                    return (
-                      <div
-                        key={d.day}
-                        title={`${d.day}: ${fmtCredit(d.credit)}（${d.requests} 次请求）`}
-                        style={{
-                          width: 10,
-                          height: h,
-                          borderRadius: 2,
-                          background: d.credit > 0 ? 'var(--accent)' : 'var(--bg-subtle, rgba(128,128,128,.25))',
-                          opacity: d.credit > 0 ? 1 : 0.5,
-                        }}
-                      />
-                    )
-                  })}
-                </div>
-              )}
             </div>
           ))}
           <div className="desc" style={{ marginTop: 8 }}>
-            {summary.cmp > 0 && (
-              <span>
-                {summary.cmpLabel}同期 {fmtCredit(summary.cmp)} ·{' '}
-              </span>
-            )}
-            排名按当前区间消耗降序；条长为区间内占比（相对最大者）。
+            排名按当前区间消耗降序；条长为区间内占比（相对最大者）；「详情」看逐日与模型分解。
           </div>
         </div>
       )}

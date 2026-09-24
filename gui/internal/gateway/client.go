@@ -421,18 +421,32 @@ type UsageSnapshot struct {
 	Yesterday float64        `json:"yesterday"`
 	Last7d    float64        `json:"last_7d"`
 	Total     float64        `json:"total"`
+	// Daily 全局逐日消耗（近 30 天，旧→新），仪表盘趋势图数据源。
+	Daily []UsageDay `json:"daily,omitempty"`
+}
+
+// UsageModel 单模型在某账号下的消耗与用量（详情弹窗「模型分解」行）。
+type UsageModel struct {
+	Model            string  `json:"model"`
+	Credit           float64 `json:"credit"`
+	Requests         int64   `json:"requests"`
+	PromptTokens     int64   `json:"prompt_tokens"`
+	CompletionTokens int64   `json:"completion_tokens"`
+	CacheHit         int64   `json:"cache_hit"`
+	CacheMiss        int64   `json:"cache_miss"`
 }
 
 // AccountUsage 单账号积分消耗（镜像网关 metrics.AccountUsage；前 8 位 UID 口径）。
 type AccountUsage struct {
-	UID       string     `json:"uid"`
-	Nickname  string     `json:"nickname,omitempty"`
-	Today     float64    `json:"today"`
-	Yesterday float64    `json:"yesterday"`
-	Last7d    float64    `json:"last_7d"`
-	Total     float64    `json:"total"`
-	Requests  int64      `json:"requests"`
-	Daily     []UsageDay `json:"daily,omitempty"`
+	UID       string       `json:"uid"`
+	Nickname  string       `json:"nickname,omitempty"`
+	Today     float64      `json:"today"`
+	Yesterday float64      `json:"yesterday"`
+	Last7d    float64      `json:"last_7d"`
+	Total     float64      `json:"total"`
+	Requests  int64        `json:"requests"`
+	Daily     []UsageDay   `json:"daily,omitempty"`
+	ByModel   []UsageModel `json:"by_model,omitempty"`
 }
 
 // UsageDay 单日消耗（旧→新）。

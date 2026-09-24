@@ -448,13 +448,34 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		Total:           officialTotal,
 	}
 
+	// 账号级成本换算：把每个账号各模型的 token 按官方价折成"走官方 API 要花
+	// 多少钱"，供仪表盘详情弹窗展示「相当于省了多少钱」。与上面同样必须
+	// 各模型分别计价后相加。每账号一个汇总（未命中价格表的模型计入 unpriced）。
+	accountCosts := map[string]float64{}
+	for _, au := range st.Usage.Accounts {
+		var sum float64
+		for _, m := range au.ByModel {
+			c := table.Compute(m.Model, pricing.Usage{
+				PromptTokens:     m.PromptTokens,
+				CacheHitTokens:   m.CacheHit,
+				CacheMissTokens:  m.CacheMiss,
+				CompletionTokens: m.CompletionTokens,
+			}, mode)
+			if c.Priced {
+				sum += c.Total
+			}
+		}
+		accountCosts[au.UID] = sum
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"stats":    st,
-		"mode":     mode,
-		"costs":    costs,
-		"total":    total,
-		"priced":   pricedModels,
-		"unpriced": unpricedModels,
+		"stats":         st,
+		"mode":          mode,
+		"costs":         costs,
+		"total":         total,
+		"priced":        pricedModels,
+		"unpriced":      unpricedModels,
+		"account_costs": accountCosts,
 		"pricing": map[string]any{
 			"models":     table.ModelsCopy(),
 			"source":     table.Source,

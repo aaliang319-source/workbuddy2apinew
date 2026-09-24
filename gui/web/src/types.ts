@@ -351,6 +351,17 @@ export interface UsageDay {
   requests: number
 }
 
+/** 单模型在某账号下的消耗与用量（详情弹窗「模型分解」行）。 */
+export interface UsageModel {
+  model: string
+  credit: number
+  requests: number
+  prompt_tokens: number
+  completion_tokens: number
+  cache_hit: number
+  cache_miss: number
+}
+
 /** 单账号的积分消耗视图（UID 前 8 位口径，昵称由面板回填）。 */
 export interface AccountUsage {
   uid: string
@@ -362,6 +373,8 @@ export interface AccountUsage {
   requests: number
   /** 近 7 天逐日（旧→新），供迷你趋势 */
   daily?: UsageDay[]
+  /** 保留期内按模型分解（积分降序） */
+  by_model?: UsageModel[]
 }
 
 /** 按账号积分消耗汇总。 */
@@ -371,7 +384,18 @@ export interface UsageSnapshot {
   yesterday: number
   last_7d: number
   total: number
+  /** 全局逐日消耗（近 30 天，旧→新），仪表盘趋势图数据源 */
+  daily?: UsageDay[]
 }
+
+/** /api/stats 响应扩展：账号级官方价换算（uid → 元）。 */
+export interface StatsWithAccountCosts extends StatsResponse {
+  /** 每账号按官方价折算的「相当于官方 API 花费」（元） */
+  account_costs?: Record<string, number>
+}
+
+/** 消耗统计的区间维度（仪表盘卡片 + 详情弹窗共用）。 */
+export type UsageRange = 'today' | 'last7d' | 'total'
 
 /** 单个模型的官方单价（元/百万 token）。 */
 export interface ModelPrice {

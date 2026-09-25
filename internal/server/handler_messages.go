@@ -161,7 +161,10 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	var keyModelSeq []string
 	if k := handlerKey(r); k != nil && len(k.Models) > 0 {
 		for _, m := range k.ModelsSorted() {
-			keyModelSeq = append(keyModelSeq, m.Name)
+			// 白名单项口径容错：契约要求裸名，与 chatCompletions 同构，统一剥 realm 前缀，
+			// 避免手改 data/keys.json 写成 "cn:xxx" 时把前缀透传给上游 → 11102。
+			_, bare := resolveModel(m.Name)
+			keyModelSeq = append(keyModelSeq, bare)
 		}
 		if bareModel == "auto" && keyModelSeq[0] != "auto" {
 			body = rewriteModel(body, keyModelSeq[0])

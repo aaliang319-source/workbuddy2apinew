@@ -699,7 +699,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	var keyModelSeq []string
 	if k := handlerKey(r); k != nil && len(k.Models) > 0 {
 		for _, m := range k.ModelsSorted() {
-			keyModelSeq = append(keyModelSeq, m.Name)
+			// 白名单项口径容错：契约要求裸名（internal/keys/keys.go），但 data/keys.json
+			// 可能被手工/脚本写成带 realm 前缀的 "cn:xxx"（面板 UI 已剥前缀，手改不保证）。
+			// 这里统一剥前缀，否则前缀项会被原样写进出站 body → 上游 11102 model not found。
+			_, bare := resolveModel(m.Name)
+			keyModelSeq = append(keyModelSeq, bare)
 		}
 		if bareModel == "auto" && keyModelSeq[0] != "auto" {
 			body = rewriteModel(body, keyModelSeq[0])

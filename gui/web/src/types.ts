@@ -479,12 +479,13 @@ export interface ApiKeyEntry {
 
 // ── 自动化（/api/automation/*，数据源为网关 /admin/automation/*）────────────
 
-/** 单条执行结果（账号类任务一账号一条；脚本类任务一条，output 在 run 上）。 */
+/** 单条执行结果（账号类任务一账号一条；脚本类任务由网关解析输出成一账号一条）。 */
 export interface AutomationItem {
   uid?: string
   nickname?: string
   ok: boolean
-  status: 'ok' | 'already' | 'fail' | 'skipped' | string
+  /** unreached = 脚本没返回该账号任何结果（面板展示为「未执行」） */
+  status: 'ok' | 'already' | 'fail' | 'skipped' | 'unreached' | string
   message?: string
   reward?: number
   credits?: number | null
@@ -500,6 +501,12 @@ export interface AutomationRun {
   ok: number
   failed: number
   skipped: number
+  /** 参与账号数（列表视图不含 items，用这个派生计数） */
+  accounts?: number
+  /** 列表摘要：首个失败 / 未执行 / 跳过条目的说明 */
+  reason?: string
+  /** 脚本类任务：逐账号明细与脚本汇总行对不上时的提示（多为输出被截断） */
+  parse_warning?: string
   error?: string
   output?: string
   exit_code?: number | null

@@ -9,8 +9,46 @@
 // 与本页的网关级执行是两条路径，结果口径可能略有差异（后续统一）。
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../api'
-import type { AutomationKindStatus, AutomationRun, AutomationStatus, SessionInfo } from '../types'
+import type {
+  AutomationItem,
+  AutomationKindStatus,
+  AutomationRun,
+  AutomationStatus,
+  SessionInfo,
+} from '../types'
 import { Alert, Badge, ConfirmDialog, fmtISO, fmtNum, Modal, Spinner } from '../ui'
+
+// 逐账号状态口径（网关 automation.Item.Status）。unreached 是"脚本没返回该账号任何
+// 结果"，与 skipped（明确跳过且有原因）分开显示——这正是"哪个没执行"的答案。
+const STATUS_LABELS: Record<string, string> = {
+  ok: '成功',
+  already: '已领',
+  fail: '失败',
+  skipped: '跳过',
+  unreached: '未执行',
+}
+
+const STATUS_BADGES: Record<string, string> = {
+  ok: 'badge-ok',
+  already: 'badge-dim',
+  skipped: 'badge-dim',
+  unreached: 'badge-warn',
+  fail: 'badge-danger',
+}
+
+// 详情统计与过滤的展示顺序：异常在前，一眼看出这次哪里不对。
+const STATUS_ORDER = ['fail', 'unreached', 'skipped', 'already', 'ok']
+
+/** 逐账号状态计数（详情顶部一行统计，点一下即过滤）。 */
+function countStatuses(items: AutomationItem[]): { status: string; n: number }[] {
+  const m = new Map<string, number>()
+  for (const it of items) m.set(it.status, (m.get(it.status) ?? 0) + 1)
+  const known = STATUS_ORDER.filter((s) => m.has(s)).map((s) => ({ status: s, n: m.get(s) ?? 0 }))
+  const unknown = [...m.keys()]
+    .filter((s) => !STATUS_ORDER.includes(s))
+    .map((s) => ({ status: s, n: m.get(s) ?? 0 }))
+  return [...known, ...unknown]
+}
 
 const KIND_LABELS: Record<string, string> = {
   checkin: '自动签到',
@@ -53,6 +91,8 @@ export default function Automation({ session }: { session: SessionInfo }) {
   const [triggering, setTriggering] = useState<string | null>(null)
   const [confirmKind, setConfirmKind] = useState<string | null>(null)
   const [detail, setDetail] = useState<AutomationRun | null>(null)
+  // 详情里的逐账号过滤（null = 全部）；点开新记录时清空，避免沿用上一条的过滤条件。
+  const [statusFilter, setStatusFilter] = useState<string | null>(null)
   const pollRef = useRef<number | null>(null)
 
   const writable = !session.read_only
@@ -162,6 +202,7 @@ export default function Automation({ session }: { session: SessionInfo }) {
     setNotice(null)
     try {
       const res = await api.automationTrigger(kind)
+      setStatusFilter(null)
       setDetail(res.run)
       void load(true)
     } catch (err) {
@@ -172,6 +213,11 @@ export default function Automation({ session }: { session: SessionInfo }) {
   }
 
   if (loading) return <Spinner label="加载自动化状态…" />
+
+  // 详情页的逐账号视图：状态统计 + 过滤（脚本类任务一次十几条，不筛很难看出"谁没跑"）。
+  const detailItems = detail?.items ?? []
+  const statusCounts = countStatuses(detailItems)
+  const shownItems = statusFilter ? detailItems.filter((it) => it.status === statusFilter) : detailItems
 
   return (
     <>
@@ -245,7 +291,8 @@ export default function Automation({ session }: { session: SessionInfo }) {
                   <th>任务</th>
                   <th>触发</th>
                   <th>开始时间</th>
-                  <th className="num">成功 / 失败 / 跳过</th>
+                  <th className="num">账号</th>
+                  <th>成功 / 失败 / 跳过（含原因摘要）</th>
                   <th>耗时</th>
                   <th></th>
                 </tr>
@@ -262,16 +309,42 @@ export default function Automation({ session }: { session: SessionInfo }) {
                     <td className="text-dim" style={{ fontSize: 12 }}>
                       {fmtISO(r.started_at)}
                     </td>
-                    <td className="num">
-                      <span className="text-ok">{fmtNum(r.ok)}</span> /{' '}
-                      <span className={r.failed > 0 ? 'text-danger' : 'text-dim'}>{fmtNum(r.failed)}</span> /{' '}
-                      <span className="text-dim">{fmtNum(r.skipped)}</span>
+                    <td className="num text-dim">{r.accounts ? fmtNum(r.accounts) : '—'}</td>
+                    <td>
+                      <div>
+                        <span className="text-ok">{fmtNum(r.ok)}</span> /{' '}
+                        <span className={r.failed > 0 ? 'text-danger' : 'text-dim'}>{fmtNum(r.failed)}</span> /{' '}
+                        <span className="text-dim">{fmtNum(r.skipped)}</span>
+                      </div>
+                      {(r.reason || r.parse_warning) && (
+                        <div
+                          className="text-dim"
+                          style={{
+                            fontSize: 12,
+                            maxWidth: 340,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                          // 列表只给一行摘要，完整明细在详情里（鼠标悬停可看全文）
+                          title={[r.reason, r.parse_warning].filter(Boolean).join('；')}
+                        >
+                          {r.parse_warning ? '⚠ ' : ''}
+                          {r.reason || r.parse_warning}
+                        </div>
+                      )}
                     </td>
                     <td className="text-dim" style={{ fontSize: 12 }}>
                       {durationOf(r)}
                     </td>
                     <td>
-                      <button className="btn btn-sm" onClick={() => setDetail(r)}>
+                      <button
+                        className="btn btn-sm"
+                        onClick={() => {
+                          setStatusFilter(null)
+                          setDetail(r)
+                        }}
+                      >
                         详情
                       </button>
                     </td>
@@ -298,52 +371,101 @@ export default function Automation({ session }: { session: SessionInfo }) {
             <dt>结果</dt>
             <dd>
               成功 {detail.ok} · 失败 {detail.failed} · 跳过 {detail.skipped}
+              {detail.accounts ? ` · 账号 ${detail.accounts}` : ''}
               {detail.exit_code !== null && detail.exit_code !== undefined ? ` · 退出码 ${detail.exit_code}` : ''}
             </dd>
           </div>
           {detail.error && <Alert kind="error">{detail.error}</Alert>}
-          {(detail.items ?? []).length > 0 && (
-            <div style={{ overflowX: 'auto', marginTop: 10 }}>
-              <table>
-                <thead>
-                  <tr>
-                    <th>账号</th>
-                    <th>状态</th>
-                    <th>说明</th>
-                    <th className="num">收益</th>
-                    <th className="num">余额</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(detail.items ?? []).map((it, i) => (
-                    <tr key={`${it.uid || 'script'}-${i}`}>
-                      <td>{it.nickname || it.uid?.slice(0, 8) || '—'}</td>
-                      <td>
-                        <Badge cls={it.ok ? (it.status === 'ok' ? 'badge-ok' : 'badge-dim') : 'badge-danger'}>
-                          {it.status}
-                        </Badge>
-                      </td>
-                      <td className="text-dim" style={{ fontSize: 12, maxWidth: 360, wordBreak: 'break-all' }}>
-                        {it.message || '—'}
-                      </td>
-                      <td className="num">{it.reward ? `+${it.reward}` : '—'}</td>
-                      <td className="num">{it.credits ?? '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {detail.truncated && <p className="text-dim">条目超出上限，仅显示前 500 条。</p>}
-            </div>
+          {detail.parse_warning && (
+            <Alert kind="warn">
+              逐账号明细可能不全：{detail.parse_warning}
+            </Alert>
           )}
-          {detail.output && (
+          {detailItems.length > 0 && (
             <>
-              <p className="desc" style={{ marginBottom: 4 }}>
-                脚本输出（尾部）：
-              </p>
-              <div className="muted-box mono" style={{ whiteSpace: 'pre-wrap', maxHeight: 240, overflowY: 'auto' }}>
-                {detail.output}
+              {/* 统计即过滤器：详情里十几个账号，直接点"失败 2"看那两行。 */}
+              <div className="row" style={{ gap: 8, flexWrap: 'wrap', alignItems: 'center', marginTop: 10 }}>
+                <button
+                  className={`btn btn-sm ${statusFilter === null ? 'btn-primary' : ''}`}
+                  onClick={() => setStatusFilter(null)}
+                >
+                  全部 {detailItems.length}
+                </button>
+                {statusCounts.map((c) => (
+                  <button
+                    key={c.status}
+                    className={`btn btn-sm ${statusFilter === c.status ? 'btn-primary' : ''}`}
+                    onClick={() => setStatusFilter(statusFilter === c.status ? null : c.status)}
+                  >
+                    {STATUS_LABELS[c.status] ?? c.status} {c.n}
+                  </button>
+                ))}
+                {statusFilter === 'unreached' && (
+                  <span className="text-dim" style={{ fontSize: 12 }}>
+                    未执行 = 脚本没返回该账号任何结果（多为输出显示上限截断，或执行中途中断）
+                  </span>
+                )}
+              </div>
+              <div style={{ overflowX: 'auto', marginTop: 8 }}>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>账号</th>
+                      <th>状态</th>
+                      <th>说明</th>
+                      <th className="num">收益</th>
+                      <th className="num">余额</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {shownItems.map((it, i) => (
+                      <tr key={`${it.uid || 'script'}-${i}`}>
+                        <td>{it.nickname || it.uid?.slice(0, 8) || '—'}</td>
+                        <td>
+                          <Badge cls={STATUS_BADGES[it.status] ?? 'badge-dim'}>
+                            {STATUS_LABELS[it.status] ?? it.status}
+                          </Badge>
+                        </td>
+                        <td className="text-dim" style={{ fontSize: 12, maxWidth: 380, wordBreak: 'break-all' }}>
+                          {it.message || '—'}
+                        </td>
+                        <td className="num">{it.reward ? `+${it.reward}` : '—'}</td>
+                        <td className="num">{it.credits ?? '—'}</td>
+                      </tr>
+                    ))}
+                    {shownItems.length === 0 && (
+                      <tr>
+                        <td colSpan={5} className="text-dim">
+                          该状态下没有条目
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+                {detail.truncated && (
+                  <p className="text-dim">条目超出上限，仅显示前 500 条（上方计数为完整口径）。</p>
+                )}
               </div>
             </>
+          )}
+          {(detail.reason || detail.parse_warning) && (
+            <p className="desc" style={{ marginTop: 10 }}>
+              结论：{detail.reason || '—'}
+              {detail.parse_warning ? `（${detail.parse_warning}）` : ''}
+            </p>
+          )}
+          {detail.output && (
+            <details style={{ marginTop: 12 }}>
+              <summary className="desc" style={{ cursor: 'pointer' }}>
+                脚本原始输出（尾部，展开查看）
+              </summary>
+              <div
+                className="muted-box mono"
+                style={{ whiteSpace: 'pre-wrap', maxHeight: 260, overflowY: 'auto', marginTop: 6 }}
+              >
+                {detail.output}
+              </div>
+            </details>
           )}
         </Modal>
       )}

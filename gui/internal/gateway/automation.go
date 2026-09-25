@@ -29,21 +29,25 @@ type AutomationItem struct {
 }
 
 // AutomationRun 一次执行记录（镜像网关 automation.Run）。
+// ⚠️ 字段必须与网关 struct 一一对应：漏字段会让面板"读不回/看不到"（历史上漏过 Models）。
 type AutomationRun struct {
-	ID         string           `json:"id"`
-	Kind       string           `json:"kind"`
-	Trigger    string           `json:"trigger"`
-	StartedAt  time.Time        `json:"started_at"`
-	FinishedAt time.Time        `json:"finished_at"`
-	OK         int              `json:"ok"`
-	Failed     int              `json:"failed"`
-	Skipped    int              `json:"skipped"`
-	Error      string           `json:"error,omitempty"`
-	Output     string           `json:"output,omitempty"`
-	ExitCode   *int             `json:"exit_code,omitempty"`
-	Items      []AutomationItem `json:"items,omitempty"`
-	Running    bool             `json:"running"`
-	Truncated  bool             `json:"truncated,omitempty"`
+	ID           string           `json:"id"`
+	Kind         string           `json:"kind"`
+	Trigger      string           `json:"trigger"`
+	StartedAt    time.Time        `json:"started_at"`
+	FinishedAt   time.Time        `json:"finished_at"`
+	OK           int              `json:"ok"`
+	Failed       int              `json:"failed"`
+	Skipped      int              `json:"skipped"`
+	Accounts     int              `json:"accounts,omitempty"`
+	Reason       string           `json:"reason,omitempty"`
+	ParseWarning string           `json:"parse_warning,omitempty"`
+	Error        string           `json:"error,omitempty"`
+	Output       string           `json:"output,omitempty"`
+	ExitCode     *int             `json:"exit_code,omitempty"`
+	Items        []AutomationItem `json:"items,omitempty"`
+	Running      bool             `json:"running"`
+	Truncated    bool             `json:"truncated,omitempty"`
 }
 
 // AutomationKindStatus 单任务类型状态。

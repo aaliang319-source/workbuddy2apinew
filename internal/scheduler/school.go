@@ -8,6 +8,10 @@
 // 输出捕获：脚本 stdout/stderr 合并后取尾部若干行随 Outcome 回传（此前被丢弃，
 // 失败只剩 "exit status N"，面板无从展示原因）。捕获通过可选接口 ctxRunner 实现，
 // 测试注入的 fake 不实现该接口 → 自动退化为 Run()，既有测试断言零改动。
+//
+// 逐账号明细：尾部文本只够人看，不够回答"哪个账号跑了/没跑/为什么"。故在截断**之前**
+// 用完整输出解析出逐账号结果挂在 Outcome.Items（见 script_parse.go，解析失败自动退化
+// 为"整批一条"）。
 package scheduler
 
 import (
@@ -147,20 +151,56 @@ func runScript(ctx context.Context, name, root string, timeout time.Duration, co
 			err = c.Run()
 		}
 		tail := tailLines(raw, scriptOutputTailLines)
-		oc := Outcome{Status: "ok", OK: true, Message: "ok"}
+		oc := Outcome{Status: StatusOK, OK: true, Message: "ok"}
 		if err != nil {
 			log.Printf("WARN: %s (%s): %v", name, cmdArgs[1], err)
-			oc.OK, oc.Status, oc.Message = false, "fail", err.Error()
+			oc.OK, oc.Status, oc.Message = false, StatusFail, err.Error()
 			oc.ExitCode = exitCodeOf(err)
 		} else {
 			log.Printf("%s: ok (%s)", name, cmdArgs[1])
 			oc.ExitCode = intPtr(0)
+		}
+		// 逐账号明细从**完整**输出解析（tail 只用于展示，末尾 50 行会丢掉靠前的账号）。
+		// 解析不出来则 Items 为空，调用方按"整批一条"的旧口径处理。
+		if items, warn := parseScriptOutput(raw); len(items) > 0 {
+			oc.Items = items
+			oc.ParseWarning = warn
 		}
 		oc.Output = tail
 		out = append(out, oc)
 	}
 	return out
 }
+
+// enrichScriptItems 用账号池把脚本输出的 8 位 uid 前缀补成完整 UID + 昵称。
+//
+// 脚本只打印 uid[:8]（school 连昵称都没有），而面板按 UID 关联账号、按昵称展示；
+// 池里查不到（账号已删/前缀不匹配）时保留前缀原样，不编造。
+func (s *Scheduler) enrichScriptItems(outs []Outcome) {
+	if s.cfg.Pool == nil {
+		return
+	}
+	byUID8 := make(map[string][2]string, 8)
+	for _, st := range s.cfg.Pool.List() {
+		if len(st.UID) >= 8 {
+			byUID8[st.UID[:8]] = [2]string{st.UID, st.Nickname}
+		}
+	}
+	for i := range outs {
+		for j := range outs[i].Items {
+			it := &outs[i].Items[j]
+			full, ok := byUID8[it.UID]
+			if !ok {
+				continue
+			}
+			it.UID = full[0]
+			if it.Nickname == "" {
+				it.Nickname = full[1]
+			}
+		}
+	}
+}
+
 
 // tailLines 取文本尾部最多 n 行且不超过 scriptOutputMaxBytes 字节（超出再从头部截断）。
 func tailLines(s string, n int) string {
@@ -200,9 +240,11 @@ func (s *Scheduler) RunSchoolNow() []Outcome {
 // RunSchoolCtx 带 ctx 的开学季任务（ctx 取消/超时即杀子进程）。
 func (s *Scheduler) RunSchoolCtx(ctx context.Context) []Outcome {
 	root := repoRoot()
-	return runScript(ctx, "school", root, s.cfg.ScriptTimeout, [][]string{
+	outs := runScript(ctx, "school", root, s.cfg.ScriptTimeout, [][]string{
 		{pythonCmd(), "scripts/school_open_day_2026.py", "ALL", "--run", "--yes"},
 	})
+	s.enrichScriptItems(outs)
+	return outs
 }
 
 // RunCatNow 立即执行夜猫子任务：task_runner.py ALL --yes --only black_cat。
@@ -215,7 +257,9 @@ func (s *Scheduler) RunCatNow() []Outcome {
 // RunCatCtx 带 ctx 的夜猫子任务（ctx 取消/超时即杀子进程）。
 func (s *Scheduler) RunCatCtx(ctx context.Context) []Outcome {
 	root := repoRoot()
-	return runScript(ctx, "cat", root, s.cfg.ScriptTimeout, [][]string{
+	outs := runScript(ctx, "cat", root, s.cfg.ScriptTimeout, [][]string{
 		{pythonCmd(), "scripts/task_runner.py", "ALL", "--yes", "--only", "black_cat"},
 	})
+	s.enrichScriptItems(outs)
+	return outs
 }

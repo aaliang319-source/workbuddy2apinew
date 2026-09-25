@@ -11,13 +11,24 @@ import (
 	"time"
 )
 
+// 逐账号结果状态取值（Outcome.Status 与 automation.Item.Status 共用同一口径）。
+const (
+	StatusOK      = "ok"      // 执行成功
+	StatusAlready = "already" // 上游判定已完成/已领（幂等重复，视为正常）
+	StatusFail    = "fail"    // 失败
+	StatusSkipped = "skipped" // 跳过（门控/无有效凭证/非进行期等，Message 带原因）
+	// StatusUnreached 脚本未返回任何结果的账号：声明要处理却没出现在输出里
+	// （输出被上限截断、或执行中途中断）。只在脚本类任务的解析结果里出现。
+	StatusUnreached = "unreached"
+)
+
 // Outcome 一次任务执行中单个账号（或脚本类任务的整体）的结果。
 // 账号类任务 UID 非空；脚本类任务 UID 为空、Message 携带输出尾部与退出码语义。
 type Outcome struct {
 	UID      string `json:"uid,omitempty"`
 	Nickname string `json:"nickname,omitempty"`
 	OK       bool   `json:"ok"`
-	Status   string `json:"status"` // ok | already | fail | skipped
+	Status   string `json:"status"` // ok | already | fail | skipped | unreached
 	Message  string `json:"message,omitempty"`
 	Reward   int64  `json:"reward,omitempty"`  // 领奖等一次性收益
 	Credits  *int64 `json:"credits,omitempty"` // 签到后余额（查询成功才有值）
@@ -26,7 +37,15 @@ type Outcome struct {
 	// 与子进程退出码，供面板展示失败原因（此前输出被丢弃、失败只剩 exit status）。
 	Output   string `json:"output,omitempty"`
 	ExitCode *int   `json:"exit_code,omitempty"`
+
+	// Items 仅脚本类任务填充：从子进程输出解析出的逐账号结果（见 script_parse.go）。
+	// 非空表示这条 Outcome 是"命令级元信息"（UID 为空、携带 Output/ExitCode），
+	// 真实结论在 Items 里；为空表示没有可解析的逐账号线索，调用方按整批一条处理。
+	Items []Outcome `json:"items,omitempty"`
+	// ParseWarning 逐账号明细与脚本自己的汇总行对不上时的提示（可能被输出上限截断）。
+	ParseWarning string `json:"parse_warning,omitempty"`
 }
+
 
 // Kind 任务类型的稳定字符串标识（配置键、admin API 路径、历史记录共用）。
 type Kind string

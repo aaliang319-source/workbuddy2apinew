@@ -316,14 +316,14 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 	for _, st := range statuses {
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
 		if st.Disabled {
-			oc.Status, oc.Detail = CheckinSkipped, "disabled"
+			oc.Status, oc.Detail = CheckinSkipped, "账号已在面板禁用，未参与本次签到"
 			skipN++
 			out = append(out, oc)
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshToken == "" {
-			oc.Status, oc.Detail = CheckinSkipped, "no credentials"
+			oc.Status, oc.Detail = CheckinSkipped, "无有效凭证（缺少 refresh token），未参与本次签到"
 			skipN++
 			out = append(out, oc)
 			continue
@@ -332,7 +332,7 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 		// 经 auth.Realm() 统一判定：逃生门（global.enabled=false）下 global 账号被降级为 cn、
 		// 按 CN 处理——这是 D5 逃生门的刻意语义（纯 CN 部署锁死一切 global），与引用处一致。
 		if a.IsGlobal() {
-			oc.Status, oc.Detail = CheckinSkipped, "global"
+			oc.Status, oc.Detail = CheckinSkipped, "global realm 账号不参与 CN 域签到任务"
 			skipN++
 			out = append(out, oc)
 			continue
@@ -373,9 +373,10 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 		// 签到返回错误（含"今天已签到"）也继续查余额：余额恢复即可解冻账号。
 		if err := s.cfg.Upstream.DailyCheckin(a); err != nil {
 			if upstream.IsAlreadyCheckin(err) {
-				// "今天已签到"是幂等成功，不是错误：不填 detail，免得回执里
-				// 出现一整段 400 报文、被误读成签到失败。
+				// "今天已签到"是幂等成功，不是错误：只写一句人话结论，
+				// 不把上游 400 报文原样塞进 detail（那会被误读成签到失败）。
 				oc.Status = CheckinAlready
+				oc.Detail = "上游判定今日已签到（幂等成功），无需重复"
 			} else {
 				oc.Status = CheckinFail
 				oc.Detail = err.Error()
@@ -543,12 +544,14 @@ func (s *Scheduler) RunKeepaliveCtx(ctx context.Context) []Outcome {
 	out := []Outcome{}
 	for _, st := range s.cfg.Pool.List() {
 		if st.Disabled {
-			out = append(out, Outcome{UID: st.UID, Nickname: st.Nickname, OK: false, Status: "skipped", Message: "disabled"})
+			out = append(out, Outcome{UID: st.UID, Nickname: st.Nickname, OK: false, Status: StatusSkipped,
+				Message: "账号已在面板禁用，未参与保活刷新"})
 			continue
 		}
 		a := s.cfg.Pool.AuthByUID(st.UID)
 		if a == nil || a.RefreshToken == "" {
-			out = append(out, Outcome{UID: st.UID, Nickname: st.Nickname, OK: false, Status: "skipped", Message: "no credentials"})
+			out = append(out, Outcome{UID: st.UID, Nickname: st.Nickname, OK: false, Status: StatusSkipped,
+				Message: "无有效凭证（缺少 refresh token），未参与保活刷新"})
 			continue
 		}
 		if err := s.cfg.Upstream.RefreshToken(a); err != nil {

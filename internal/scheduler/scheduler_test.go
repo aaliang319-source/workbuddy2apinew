@@ -644,8 +644,11 @@ func TestCheckinAllAlready(t *testing.T) {
 	if out[0].Status != CheckinAlready {
 		t.Errorf("status=%q want already", out[0].Status)
 	}
-	if out[0].Detail != "" {
-		t.Errorf("已签到不应回填 detail，got=%q", out[0].Detail)
+	if !strings.Contains(out[0].Detail, "今日已签到") {
+		t.Errorf("已签到应回填一句人话结论（不含上游 400 报文），got=%q", out[0].Detail)
+	}
+	if strings.Contains(out[0].Detail, "{") {
+		t.Errorf("detail 不应回填上游报文原文，got=%q", out[0].Detail)
 	}
 }
 
@@ -702,8 +705,8 @@ func TestCheckinAllSkipsNoCredentials(t *testing.T) {
 	if out[0].Status != CheckinSkipped {
 		t.Errorf("status=%q want skipped", out[0].Status)
 	}
-	if out[0].Detail != "no credentials" {
-		t.Errorf("detail=%q want no credentials", out[0].Detail)
+	if !strings.Contains(out[0].Detail, "无有效凭证") {
+		t.Errorf("detail=%q want 含「无有效凭证」的说明（面板直接展示这句）", out[0].Detail)
 	}
 }
 

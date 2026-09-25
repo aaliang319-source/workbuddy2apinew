@@ -3,6 +3,7 @@ package scheduler
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -73,8 +74,8 @@ func TestGlobalAccountSkippedListedWithStatus(t *testing.T) {
 	if out[0].Status != CheckinSkipped {
 		t.Errorf("status=%q want skipped（global 门控回执）", out[0].Status)
 	}
-	if out[0].Detail != "global" {
-		t.Errorf("detail=%q want global", out[0].Detail)
+	if !strings.Contains(out[0].Detail, "global realm") {
+		t.Errorf("detail=%q want 含 global realm 的说明（面板直接展示这句）", out[0].Detail)
 	}
 	if calls.Load() != 0 {
 		t.Errorf("upstream calls=%d want 0", calls.Load())

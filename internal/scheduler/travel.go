@@ -157,7 +157,7 @@ func (s *Scheduler) travelOne(a *auth.Auth) Outcome {
 		return Outcome{UID: a.UID, OK: true, Status: "skipped", Message: fmt.Sprintf("traveling record=%d", ts.RecordID)}
 	default:
 		log.Printf("travel %s: skip (unknown state %q)", logfmt.UID8(a.UID), ts.State)
-		return Outcome{UID: a.UID, OK: true, Status: "skipped", Message: "unknown state " + ts.State}
+		return Outcome{UID: a.UID, OK: true, Status: StatusSkipped, Message: "旅行状态未知（" + ts.State + "），本轮未处理"}
 	}
 }
 
@@ -165,7 +165,7 @@ func (s *Scheduler) travelOne(a *auth.Auth) Outcome {
 func (s *Scheduler) travelDepart(a *auth.Auth, ts *upstream.TravelState) Outcome {
 	if ts.DailyLimitReached {
 		log.Printf("travel %s: skip (daily limit reached)", logfmt.UID8(a.UID))
-		return Outcome{UID: a.UID, OK: true, Status: "skipped", Message: "daily limit reached"}
+		return Outcome{UID: a.UID, OK: true, Status: StatusSkipped, Message: "今日旅行次数已达上限，未再派出"}
 	}
 	if err := s.cfg.Upstream.TravelDepart(a, travelLocationID); err != nil {
 		log.Printf("travel %s: depart: %v", logfmt.UID8(a.UID), err)

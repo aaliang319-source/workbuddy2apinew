@@ -14,12 +14,12 @@ const (
 	TriggerManual   = "manual"   // 面板/接口手动触发
 )
 
-// Item 单条执行结果（账号类任务一账号一条；脚本类任务一条，Output 带输出尾部）。
+// Item 单条执行结果（账号类任务一账号一条；脚本类任务由输出解析成一账号一条）。
 type Item struct {
 	UID      string `json:"uid,omitempty"`
 	Nickname string `json:"nickname,omitempty"`
 	OK       bool   `json:"ok"`
-	Status   string `json:"status"` // ok | already | fail | skipped
+	Status   string `json:"status"` // ok | already | fail | skipped | unreached（脚本未返回结果的账号）
 	Message  string `json:"message,omitempty"`
 	Reward   int64  `json:"reward,omitempty"`
 	Credits  *int64 `json:"credits,omitempty"`
@@ -36,7 +36,17 @@ type Run struct {
 	Failed     int       `json:"failed"`
 	Skipped    int       `json:"skipped"`
 
-	// Error 非空表示整批失败（撞车/执行器异常），账号级失败看 Items/Failed。
+	// Accounts 参与账号数（Items 里带 UID 的条数）；列表视图会剥掉 Items，
+	// 故单独留这个计数，让列表能显示"账号 N"而不是只看到 成功/失败/跳过。
+	Accounts int `json:"accounts,omitempty"`
+	// Reason 列表摘要：首个失败 / 未执行 / 跳过条目的说明（详情页有完整明细）。
+	Reason string `json:"reason,omitempty"`
+	// ParseWarning 脚本类任务：逐账号明细与脚本自己的汇总行对不上时的提示
+	// （通常意味着明细被输出上限截断）——不静默，列表与详情都展示。
+	ParseWarning string `json:"parse_warning,omitempty"`
+
+	// Error 非空表示整批失败（脚本未产出任何逐账号明细 / 执行器异常），
+	// 账号级失败看 Items/Failed。
 	Error string `json:"error,omitempty"`
 	// Output / ExitCode 仅脚本类任务（school/cat）：子进程合并输出尾部与退出码。
 	Output   string `json:"output,omitempty"`
@@ -50,6 +60,7 @@ type Run struct {
 }
 
 // summary 列表视图：去掉逐账号明细与脚本输出，避免列表响应过大。
+// 注意 Accounts/Reason/ParseWarning 是刻意保留的派生摘要（见字段注释），不在这里清空。
 func (r Run) summary() Run {
 	r.Items = nil
 	r.Output = ""

@@ -199,11 +199,30 @@ func (m *Manager) Run(ctx context.Context) {
 func (m *Manager) runSync(ctx context.Context, kind scheduler.Kind, trigger string) (Run, bool) {
 	run, ok := m.start(kind, trigger)
 	if !ok {
+		// 到点了但没执行：此前只打一行日志，面板历史里查不到"这个时点为什么没跑"。
+		// 落一条 skipped 记录，把门控原因写进历史（详见 recordGateSkip）。
 		log.Printf("[automation] %s 已在运行，跳过本次%s触发", kind, trigger)
+		m.recordGateSkip(kind, trigger, "同类型任务上一次执行尚未结束，本次触发未执行（不重复请求上游）")
 		return Run{}, false
 	}
 	outs := m.cfg.Runner.RunKind(ctx, kind)
 	return m.finish(run, kind, outs), true
+}
+
+// recordGateSkip 记录一次"到点了、因为门控没执行"的运行：互斥（上一次还没收尾）等。
+// 不做任何实际执行，因此 StartedAt=FinishedAt、计数恒为 1 跳过，面板历史里能直接
+// 看到时点与原因，而不是只在网关日志里。手动触发撞车仍走 409（面板已有提示）。
+func (m *Manager) recordGateSkip(kind scheduler.Kind, trigger, reason string) {
+	now := m.now()
+	run := Run{
+		ID:        newRunID(kind, now),
+		Kind:      string(kind),
+		Trigger:   trigger,
+		StartedAt: now, FinishedAt: now,
+		Items: []Item{{OK: false, Status: scheduler.StatusSkipped, Message: reason}},
+	}
+	m.summarize(&run)
+	m.store.Upsert(run)
 }
 
 // Trigger 手动触发：立即返回"运行中"记录（HTTP 202 语义），执行在后台完成。
@@ -250,31 +269,40 @@ func (m *Manager) start(kind scheduler.Kind, trigger string) (Run, bool) {
 func (m *Manager) finish(run Run, kind scheduler.Kind, outs []scheduler.Outcome) Run {
 	items := make([]Item, 0, len(outs))
 	for _, o := range outs {
-		items = append(items, Item{
-			UID: o.UID, Nickname: o.Nickname, OK: o.OK, Status: o.Status,
-			Message: o.Message, Reward: o.Reward, Credits: o.Credits,
-		})
-		switch o.Status {
-		case "skipped":
-			run.Skipped++
-		default:
-			if o.OK {
-				run.OK++
-			} else {
-				run.Failed++
-			}
+		// 脚本类任务（school/cat）的真实结论在子进程输出的解析结果里：
+		// 命令级 Outcome 只带 Output/ExitCode 与解析告警，不再当作一条账号结果
+		// （否则"整批一条 ok"会把 1 跳过 + 2 失败 的实情记成 成功 1）。
+		children := o.Items
+		if len(children) == 0 {
+			children = []scheduler.Outcome{o}
+		} else if o.ParseWarning != "" {
+			run.ParseWarning = o.ParseWarning
+		}
+		for _, c := range children {
+			items = append(items, Item{
+				UID: c.UID, Nickname: c.Nickname, OK: c.OK, Status: c.Status,
+				Message: c.Message, Reward: c.Reward, Credits: c.Credits,
+			})
 		}
 	}
-	// 脚本类任务：合并输出与退出码随运行记录回传（单条 outcome）。
+	// 脚本类任务：合并输出与退出码随运行记录回传（单命令脚本 = 一条命令级 outcome）。
 	if len(outs) == 1 && outs[0].UID == "" {
 		run.Output = outs[0].Output
 		run.ExitCode = outs[0].ExitCode
+		// 解析不出逐账号明细时整批失败才算"整批 Error"（失败原因只剩 exit status N，
+		// 必须在详情页显式提示；有明细时失败原因在条目里，不重复刷一条红条）。
+		if run.Error == "" && !outs[0].OK && len(outs[0].Items) == 0 {
+			run.Error = outs[0].Message
+		}
 	}
+	// 计数用**截断前**的全量条目（口径不变：以前是逐条累加，与 Items 存不存无关）；
+	// 只有存进历史的 Items 受 maxItemsPerRun 限制，并用 Truncated 标出"仅显示部分"。
+	run.Items = items
+	m.summarize(&run)
 	if len(items) > maxItemsPerRun {
-		items = items[:maxItemsPerRun]
+		run.Items = items[:maxItemsPerRun]
 		run.Truncated = true
 	}
-	run.Items = items
 	run.Running = false
 	run.FinishedAt = m.now()
 	m.store.Upsert(run)
@@ -286,6 +314,42 @@ func (m *Manager) finish(run Run, kind scheduler.Kind, outs []scheduler.Outcome)
 	log.Printf("[automation] %s 完成（%s，run=%s）：ok=%d failed=%d skipped=%d",
 		kind, run.Trigger, run.ID, run.OK, run.Failed, run.Skipped)
 	return run
+}
+
+// summarize 从 Items 派生运行级计数与列表摘要（Run 的 OK/Failed/Skipped/Accounts/Reason）。
+//
+// 口径：账号类任务一条 Item = 一个账号；脚本类任务一条 Item = 一个账号的汇总结论
+// （见 scheduler.parseScriptOutput）。unreached（脚本没返回结果的账号）计入 Skipped——
+// 它确实是"没执行"，详情页里再按 unreached 单独标出，列表数字与账号数保持自洽。
+// Reason 供列表视图一眼看出"这次为什么不对"：失败 > 未执行 > 跳过的首个说明。
+func (m *Manager) summarize(run *Run) {
+	run.OK, run.Failed, run.Skipped, run.Accounts, run.Reason = 0, 0, 0, 0, ""
+	for _, it := range run.Items {
+		if it.UID != "" {
+			run.Accounts++
+		}
+		switch it.Status {
+		case scheduler.StatusSkipped, scheduler.StatusUnreached:
+			run.Skipped++
+		default:
+			if it.OK {
+				run.OK++
+			} else {
+				run.Failed++
+			}
+		}
+	}
+	for _, want := range []string{scheduler.StatusFail, scheduler.StatusUnreached, scheduler.StatusSkipped} {
+		for _, it := range run.Items {
+			if it.Status == want && it.Message != "" {
+				run.Reason = it.Message
+				break
+			}
+		}
+		if run.Reason != "" {
+			break
+		}
+	}
 }
 
 // Status 汇总各任务类型状态（供面板总览）。

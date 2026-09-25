@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -367,5 +368,101 @@ func TestScheduledRunRecordsTrigger(t *testing.T) {
 	}
 	if run.Trigger != TriggerSchedule {
 		t.Errorf("trigger=%q want schedule", run.Trigger)
+	}
+}
+
+// TestFinishExpandsScriptItems 脚本类任务：命令级 Outcome 带着解析出的逐账号 Items 时，
+// 计数必须来自 Items——否则 school/cat 的真实结果（例如 1 跳过 + 2 失败）会被
+// 记成「成功 1 / 失败 0 / 跳过 0」，列表页数字骗人（这正是本次要修的观感问题）。
+func TestFinishExpandsScriptItems(t *testing.T) {
+	fp := filepath.Join(t.TempDir(), "automation.json")
+	exitCode := 2
+	fr := &fakeRunner{outs: []scheduler.Outcome{{
+		OK: true, Status: scheduler.StatusOK, Message: "ok",
+		Output: "mode=RUN REAL gap=1.5\n[school2026] …", ExitCode: &exitCode,
+		Items: []scheduler.Outcome{
+			{UID: "u1", Status: scheduler.StatusOK, OK: true, Message: "点亮"},
+			{UID: "u2", Status: scheduler.StatusFail, Message: "list_tasks 失败: http=-1"},
+			{UID: "u3", Status: scheduler.StatusSkipped, Message: "活动非进行期，跳过"},
+		},
+		ParseWarning: "1 个账号未返回结果",
+	}}}
+	m := New(Config{Runner: fr, Spec: testSpec(), HistoryFile: fp, HistoryRuns: 10})
+	defer m.Close()
+
+	run, err := m.Trigger(scheduler.KindCheckin)
+	if err != nil {
+		t.Fatalf("trigger: %v", err)
+	}
+	r := waitFinished(t, m, run.ID)
+	if r.OK != 1 || r.Failed != 1 || r.Skipped != 1 {
+		t.Errorf("ok/fail/skip=%d/%d/%d want 1/1/1（脚本类不能记成「整批一条 ok」）", r.OK, r.Failed, r.Skipped)
+	}
+	if r.Accounts != 3 {
+		t.Errorf("accounts=%d want 3", r.Accounts)
+	}
+	if r.Reason != "list_tasks 失败: http=-1" {
+		t.Errorf("reason=%q want 首个失败说明（失败 > 跳过）", r.Reason)
+	}
+	if r.ParseWarning == "" {
+		t.Error("parse_warning 必须随记录回传（面板据此提示明细可能被截断）")
+	}
+	if r.Output == "" || r.ExitCode == nil || *r.ExitCode != 2 {
+		t.Errorf("脚本输出/退出码丢失：output=%q exit=%v", r.Output, r.ExitCode)
+	}
+
+	// 列表视图（summary）剥掉 Items/Output，但派生摘要必须留下——面板列表只读这些。
+	sum, ok := m.GetRun(run.ID)
+	if !ok {
+		t.Fatal("run 丢失")
+	}
+	sum = sum.summary()
+	if sum.Accounts != 3 || sum.Reason == "" || sum.ParseWarning == "" {
+		t.Errorf("summary 丢了派生摘要：%+v", sum)
+	}
+	if len(sum.Items) != 0 || sum.Output != "" {
+		t.Errorf("summary 应剥掉明细与输出：items=%d output=%q", len(sum.Items), sum.Output)
+	}
+}
+
+// TestGateSkipRecorded 定时触发撞上同类型还在跑：以前只打一行日志（面板历史里
+// 完全查不到「这个时点为什么没跑」），现在必须落一条带原因的 skipped 记录。
+func TestGateSkipRecorded(t *testing.T) {
+	fr := &fakeRunner{
+		outs:  []scheduler.Outcome{{UID: "u1", OK: true, Status: scheduler.StatusOK}},
+		delay: 300 * time.Millisecond,
+	}
+	m := New(Config{Runner: fr, Spec: testSpec(), HistoryFile: filepath.Join(t.TempDir(), "a.json"), HistoryRuns: 20})
+	defer m.Close()
+
+	real, err := m.Trigger(scheduler.KindCheckin) // 占住单飞（后台跑 300ms）
+	if err != nil {
+		t.Fatalf("trigger: %v", err)
+	}
+	if _, ok := m.runSync(context.Background(), scheduler.KindCheckin, TriggerSchedule); ok {
+		t.Fatal("同类型在跑时 runSync 不应返回有效记录")
+	}
+
+	var skip *Run
+	for _, r := range m.Runs(20) {
+		if r.Trigger == TriggerSchedule {
+			rr := r
+			skip = &rr
+			break
+		}
+	}
+	if skip == nil {
+		t.Fatal("撞车未落任何记录：面板看不到「这次为什么没跑」")
+	}
+	if skip.Skipped != 1 || skip.OK != 0 || skip.Failed != 0 {
+		t.Errorf("skip 记录计数=%d/%d/%d want 0/0/1", skip.OK, skip.Failed, skip.Skipped)
+	}
+	if !strings.Contains(skip.Reason, "尚未结束") {
+		t.Errorf("reason=%q want 说明「上一次执行尚未结束」", skip.Reason)
+	}
+	// 撞车记录不得污染真正那次运行的结果
+	got := waitFinished(t, m, real.ID)
+	if got.OK != 1 || got.Skipped != 0 {
+		t.Errorf("真实运行被撞车记录影响：%+v", got)
 	}
 }

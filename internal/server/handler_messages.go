@@ -87,6 +87,18 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 	servedModel := bareModel // 实际服务模型（模型回退后变化；出口按它记录明细/统计）
 	defer func() { h.observeMetrics(st, servedModel, req.Stream) }()
 
+	// 上下文预检：估算超上游硬上限即就地 400（canonical "prompt is too long"），不打上游
+	// ——省 6-8s 白跑往返、避免持续施压上游；Anthropic 客户端据此触发自动压缩。
+	if max := h.cfg.ContextPrecheckTokens; max > 0 {
+		if est := upstream.EstimatedPromptTokens(body); est > max {
+			writeAnthropicError(w, http.StatusBadRequest,
+				upstream.ContextOverflowMessage(est, max))
+			st.status = http.StatusBadRequest
+			st.errMsg = "context_overflow(400)"
+			return
+		}
+	}
+
 	tried := map[string]bool{}
 	var lastErr error
 

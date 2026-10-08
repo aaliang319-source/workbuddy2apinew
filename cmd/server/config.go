@@ -42,6 +42,11 @@ type Config struct {
 		// AuthResyncSeconds auths 目录运行期自动发现的扫描间隔（秒）。缺省 30：
 		// 面板/脚本落盘新账号后无需重启网关。显式 0 = 关闭；负数回落默认。
 		AuthResyncSeconds int `json:"auth_resync_seconds"`
+		// ContextPrecheckTokens 上游上下文预检上限（token）。缺省 1048576（= 上游 1M×1024
+		// 硬上限）：请求估算超此值即就地回 400 "prompt is too long"（canonical 文案，
+		// 客户端据此自动压缩），不打上游——省 6-8s 白跑往返、避免持续施压上游（封号风险）。
+		// 显式 0 = 关闭预检；必须 >= 上游真实上限，否则误拒正常请求。
+		ContextPrecheckTokens int `json:"context_precheck_tokens"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -136,13 +141,13 @@ type Config struct {
 	} `json:"upstash"`
 
 	Pool struct {
-		MaxInFlight        int     `json:"max_in_flight"`        // 单账号最大在途请求数，0 = 不限
+		MaxInFlight int `json:"max_in_flight"` // 单账号最大在途请求数，0 = 不限
 		// SpreadInFlight 在途分摊权重（防风控）：并发叠加越多的账号被选中概率越低，
 		// 并发请求自然分摊到空闲账号。缺省开启（显式 false 关闭）。
 		SpreadInFlight *bool `json:"spread_in_flight"`
 		// WafCooldown 上游 403（WAF/风控）时的账号级短冷却时长；0 = 关闭（只做
 		// 模型级负缓存避让）。默认 10m：冷却期间全部流量自动切其他账号。
-		WafCooldown string `json:"waf_cooldown"`
+		WafCooldown        string  `json:"waf_cooldown"`
 		BreakerThreshold   int     `json:"breaker_threshold"`    // 连续失败次数触发熔断，默认 3
 		BreakerCooldown    string  `json:"breaker_cooldown"`     // 基础熔断时长，默认 "30m"
 		BreakerCooldownMax string  `json:"breaker_cooldown_max"` // 指数退避封顶，默认 "6h"
@@ -243,6 +248,8 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.MaxBodyMB = 8 // 请求体上限默认 8MB
+	// 上游上下文预检缺省 = 上游硬上限 1M×1024（超此值上游会回 11115）。
+	c.Server.ContextPrecheckTokens = 1048576
 	// auths 运行期自动发现缺省 30s（面板/脚本落盘新账号无需重启网关）。
 	c.Server.AuthResyncSeconds = 30
 	// 排程段默认值由 internal/config 集中维护（cmd/server 与 cmd/activity 共用，
@@ -353,6 +360,11 @@ func applyEnv(c *Config) {
 	if v := os.Getenv("WB2A_MAX_BODY_MB"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
 			c.Server.MaxBodyMB = n
+		}
+	}
+	if v := os.Getenv("WB2A_CONTEXT_PRECHECK_TOKENS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Server.ContextPrecheckTokens = n
 		}
 	}
 	if v := os.Getenv("WB2A_AUTH_RESYNC_SECONDS"); v != "" {

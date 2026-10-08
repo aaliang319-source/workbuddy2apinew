@@ -378,6 +378,53 @@ func TestChatInvalidToolCallReturns400(t *testing.T) {
 	}
 }
 
+// TestChatContextPrecheckReturns400WithoutUpstream 预检：估算超上限的请求就地回 400
+// canonical "prompt is too long"，**不打上游**（省 6-8s 白跑往返、避免给上游持续施压）。
+func TestChatContextPrecheckReturns400WithoutUpstream(t *testing.T) {
+	calls := 0
+	up := newFakeUpstream(t, func(string) (int, string, bool) { calls++; return 200, sseOK, true })
+	h := NewHandler(Config{
+		Pool:                  testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:              up,
+		MaxBodyBytes:          1 << 20,
+		ContextPrecheckTokens: 10, // 极小上限让任意请求都触发
+	})
+	big := strings.Repeat("a", 1000) // 1000B → 估算 250 token > 10
+	body := `{"model":"glm-5.2","messages":[{"role":"user","content":"` + big + `"}]}`
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s (want 400 precheck)", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "prompt is too long") {
+		t.Errorf("precheck 400 must carry canonical trigger: %s", rec.Body)
+	}
+	if calls != 0 {
+		t.Errorf("upstream must NOT be called on precheck rejection, called %d times", calls)
+	}
+}
+
+// TestChatContextPrecheckPassesNormalRequest 正常大小的请求不受预检影响（照常打上游）。
+func TestChatContextPrecheckPassesNormalRequest(t *testing.T) {
+	calls := 0
+	up := newFakeUpstream(t, func(string) (int, string, bool) { calls++; return 200, sseOK, true })
+	h := NewHandler(Config{
+		Pool:                  testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream:              up,
+		MaxBodyBytes:          1 << 20,
+		ContextPrecheckTokens: 1048576, // 生产默认上限
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.2","messages":[{"role":"user","content":"hi"}]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s (want 200)", rec.Code, rec.Body)
+	}
+	if calls != 1 {
+		t.Errorf("normal request should reach upstream once, got %d", calls)
+	}
+}
+
 func TestChatNonStreamAggregates(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz != "Bearer at1" {

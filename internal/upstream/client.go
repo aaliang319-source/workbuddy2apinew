@@ -235,6 +235,22 @@ func ContextOverflowClientMessage(body string) string {
 	return "prompt is too long"
 }
 
+// ContextOverflowMessage 构造超限 400 文案（数字来自网关侧预估，非上游原文）。
+// handler 预检使用：在调用上游前估算 prompt token 数，超限即就地回同一 canonical 文案，
+// 省掉 6-8s 的上游往返（且避免给上游持续施压）。措辞与上游答复逐字一致，客户端判定不变。
+func ContextOverflowMessage(estimatedTokens, maxTokens int64) string {
+	return fmt.Sprintf(contextOverflowClientMsg,
+		fmt.Sprintf("%d tokens > %d maximum", estimatedTokens, maxTokens))
+}
+
+// EstimatedPromptTokens 估算请求 body 里的 prompt token 数（len(bytes)/4）。
+// 字节口径（UTF-8 多字节字符按字节数计，宁可高估）——预检是保守的启发式：
+// 高估时提前回 400 让客户端压缩（可接受），绝不会放过真正超限的请求。
+// 用 len/4 而非上游 tokenizer：与客户端自身的估算同量级，够用。
+func EstimatedPromptTokens(body []byte) int64 {
+	return int64(len(body) / 4)
+}
+
 // contextOverflowRule 输入超上下文上限关键词：HTTP 400 + 上游
 // `{"code":11115,"msg":"prompt is too long: 1049500 tokens > 1048576 maximum"}`。
 //

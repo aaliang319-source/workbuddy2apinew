@@ -6,7 +6,8 @@
   "keys_file": "./data/keys.json",
   "server": {
     "max_body_mb": 8,
-    "metrics_enabled": true
+    "metrics_enabled": true,
+    "context_precheck_tokens": 1048576
   },
   "cooldown": {
     "soft_rate": "600s",

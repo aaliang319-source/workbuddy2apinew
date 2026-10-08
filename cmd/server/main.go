@@ -181,6 +181,10 @@ func main() {
 		KeepaliveDisabled:   !cfg.Schedule.KeepaliveEnabled,
 		SchoolDisabled:      !cfg.Schedule.SchoolEnabled,
 		CatDisabled:         !cfg.Schedule.CatEnabled,
+		// 抖动跨度：触发时刻 = 所配小时 + 现掷的随机偏移，整点永不被选中。
+		// 默认 55 分钟、上限 55（span>=60 会跨小时，夜猫任务还会顶出 23-08 窗口）。
+		JitterSpanMinutes: cfg.Schedule.JitterMinutes,
+		JitterDisabled:    cfg.Schedule.JitterDisabled,
 	})
 	switch {
 	case !cfg.Schedule.CheckinEnabled:
@@ -219,8 +223,11 @@ func main() {
 	// 自动化功能层：定时循环 + 运行历史持久化 + 手动触发/状态 API。
 	// LoopEnabled=false 时回退 scheduler 原循环（kill switch，行为与引入前逐字一致）。
 	auto := automation.New(automation.Config{
-		Runner:      sch,
-		Spec:        sch.Spec(),
+		Runner: sch,
+		Spec:   sch.Spec(),
+		// 与执行侧共用同一个抖动源：掷随机数的是定时循环，面板读的是循环记下的落点。
+		// 各持一个实例会各掷各的，面板显示与真实执行就对不上了。
+		Rand:        sch.Randomizer(),
 		HistoryFile: cfg.Automation.HistoryFile,
 		HistoryRuns: cfg.Automation.HistoryRuns,
 		LoopEnabled: cfg.Automation.Enabled,
@@ -244,6 +251,8 @@ func main() {
 		PromptMode:   cfg.Prompt.Mode,
 		PromptText:   cfg.PromptText,
 		MaxBodyBytes: int64(cfg.Server.MaxBodyMB) << 20, // MB → 字节
+		// 上游上下文预检上限：超此估算值即就地 400（canonical "prompt is too long"），不打上游。
+		ContextPrecheckTokens: int64(cfg.Server.ContextPrecheckTokens),
 		// global realm 开关（handler 侧第三道闸：modelList 据此决定是否列 global 名单）。
 		GlobalEnabled: cfg.Global.Enabled,
 		// 混合调度（config global.mix_realms）：CN/global 账号同池竞争 + 模型名统一。

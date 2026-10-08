@@ -40,6 +40,11 @@ type Config struct {
 	// MaxBodyBytes 聊天请求体大小上限；<=0 兜底 8<<20（8MB）。
 	// 超限直接 413 request_body_too_large（不再静默截断喂给上游，issue #41）。
 	MaxBodyBytes int64
+	// ContextPrecheckTokens 上游上下文预检上限（token）。请求估算超此值即就地回
+	// 400 "prompt is too long"（canonical 文案，客户端据此压缩），不打上游。
+	// 必须 >= 上游真实硬上限（1048576），否则正常请求会被误拒；<=0 关闭预检。
+	// 目的：超长请求不再白跑 6-8s 上游往返、也不再给上游持续施压（封号风险）。
+	ContextPrecheckTokens int64
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// Automation 定时自动化管理器（/admin/automation/*）；nil = 不注册该组路由。
@@ -595,6 +600,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 口径是"请求级"而非"尝试级"——最终 st.status 定 success/failed）。
 	servedModel := bareModel // 实际服务模型（模型回退后变化；出口按它记录明细/统计）
 	defer func() { h.observeMetrics(st, servedModel, peek.Stream) }()
+
+	// 上下文预检：估算 prompt token 超上游硬上限即就地 400（canonical "prompt is too long"），
+	// 不打上游。省掉 6-8s 白跑往返、避免给上游持续施压；客户端据此触发自动压缩。
+	// 预检上限须 >= 上游真实上限（1048576），否则误拒正常请求。
+	if max := h.cfg.ContextPrecheckTokens; max > 0 {
+		if est := upstream.EstimatedPromptTokens(body); est > max {
+			writeOpenAIError(w, http.StatusBadRequest, "context_length_exceeded",
+				upstream.ContextOverflowMessage(est, max))
+			st.status = http.StatusBadRequest
+			st.errMsg = "context_overflow(400)"
+			return
+		}
+	}
 
 	tried := map[string]bool{}
 	var lastErr error

@@ -1,6 +1,33 @@
 package logfmt
 
-import "testing"
+import (
+	"bytes"
+	"log"
+	"strings"
+	"testing"
+)
+
+// TestWarnOnce 同一 key 只输出一次；不同 key 各自独立输出。
+func TestWarnOnce(t *testing.T) {
+	var buf bytes.Buffer
+	old := log.Writer()
+	oldFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() { log.SetOutput(old); log.SetFlags(oldFlags) }()
+
+	WarnOnce("k-a", "WARN: first %d", 1)
+	WarnOnce("k-a", "WARN: first %d", 1) // 重复：应被吞掉
+	WarnOnce("k-b", "WARN: other")
+
+	got := buf.String()
+	if n := strings.Count(got, "WARN: first"); n != 1 {
+		t.Errorf("key k-a printed %d times want 1; out=%q", n, got)
+	}
+	if !strings.Contains(got, "WARN: other") {
+		t.Errorf("key k-b should print; out=%q", got)
+	}
+}
 
 func TestUID8(t *testing.T) {
 	tests := []struct {

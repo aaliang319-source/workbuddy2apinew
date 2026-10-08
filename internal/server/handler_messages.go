@@ -308,6 +308,17 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			if kind == upstream.ErrContextOverflow {
+				// 终态：输入超模型上下文上限（11115）。Anthropic 客户端（Claude Code）
+				// 把 503 overloaded_error 当"网关过载"指数退避重试同一请求 → 死循环；
+				// 400 invalid_request_error 才会触发自身上下文压缩。不罚账号。
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, status)
+				fail(acct.UID)
+				writeAnthropicError(w, http.StatusBadRequest,
+					upstream.ContextOverflowClientMessage(string(respBody)))
+				st.status = http.StatusBadRequest
+				return
+			}
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, status)
 			fail(acct.UID)
@@ -384,6 +395,9 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 			status = http.StatusTooManyRequests
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
 		case upstream.ErrBadParams:
+			// 确定性客户端错误 → 400 invalid_request_error（不是 503 overloaded_error）：
+			// 503 会让 Claude Code 退避重试同一个畸形请求（死循环）。
+			status = http.StatusBadRequest
 			msg = "upstream rejected request params: " + ue.Msg
 		}
 	}

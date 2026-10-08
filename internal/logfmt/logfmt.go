@@ -11,9 +11,32 @@
 package logfmt
 
 import (
+	"log"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
+
+// onceKeys 记录已告警过的 key，使 WarnOnce 每个 key 在**进程生命周期内只输出一次**。
+// 用于持续性故障——例如 bind mount 属主错配导致每次运行期重扫 auths（每 30s）都写失败：
+// 首次告警足以定位，重复刷屏只会淹没真正信号（实测 8 账号 × 每 30s 的行）。
+var (
+	onceMu   sync.Mutex
+	onceKeys = map[string]bool{}
+)
+
+// WarnOnce 每个 key 只打印一次（进程级去重），首次命中才写日志。
+// format/args 交给 log.Printf（调用方自行带 "WARN:" 前缀，与全仓日志约定一致）。
+func WarnOnce(key, format string, args ...any) {
+	onceMu.Lock()
+	seen := onceKeys[key]
+	onceKeys[key] = true
+	onceMu.Unlock()
+	if seen {
+		return
+	}
+	log.Printf(format, args...)
+}
 
 // Truncate 截断字符串到 n 字节上限（先 TrimSpace，与旧 upstream/内部实现口径
 // 一致），切点落在多字节字符中间时回退到 UTF-8 rune 边界——错误 body 多为中文

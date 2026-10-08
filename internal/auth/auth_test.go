@@ -61,6 +61,86 @@ func TestSaveAtomicRoundtrip(t *testing.T) {
 	}
 }
 
+// TestSaveAtomicFollowsSymlink 凭证文件是符号链接（外部写方/挂载可能如此）时，
+// SaveAtomic 必须写**链接目标**、保留符号链接本身，而不是把链名换成普通文件。
+// 回归：不做 EvalSymlinks 时 rename 会把 symlink 顶掉（指向关系丢失）。
+func TestSaveAtomicFollowsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real.json")
+	if err := os.WriteFile(real, []byte(`{"account":{"uid":"u1"},"auth":{"accessToken":"old"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "workbuddy-u1.json")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	a := &Auth{AccessToken: "new", UID: "u1", FilePath: link}
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// 链接性质保留（仍是 symlink，不是被顶替的普通文件）。
+	if fi, err := os.Lstat(link); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("link should stay a symlink: mode=%v err=%v", fi.Mode(), err)
+	}
+	// 内容落在真实目标上。
+	raw, err := os.ReadFile(real)
+	if err != nil {
+		t.Fatalf("read real: %v", err)
+	}
+	b, err := Parse(raw)
+	if err != nil || b.AccessToken != "new" {
+		t.Errorf("real target not updated: %+v err=%v", b, err)
+	}
+}
+
+// TestSaveAtomicRepeatable 连续两次落盘都必须成功（模拟 refresh/backfill 反复写）。
+// 目标已存在时按原属主还原（同 uid 场景下 Chown 是 no-op，恒成功）。
+func TestSaveAtomicRepeatable(t *testing.T) {
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "workbuddy-u1.json")
+	a := &Auth{AccessToken: "at", UID: "u1", FilePath: fp}
+	for i := 0; i < 2; i++ {
+		if err := a.SaveAtomic(); err != nil {
+			t.Fatalf("save #%d: %v", i, err)
+		}
+	}
+	if _, err := os.Stat(fp); err != nil {
+		t.Fatalf("final file missing: %v", err)
+	}
+}
+
+// TestSaveAtomicFallsBackWhenDirUnwritable 目录不可写（tmp 建不出）但文件本身可写时，
+// SaveAtomic 退化为原地截断重写并成功——而非静默失败。复现 bind mount 的 auths/ 归 root、
+// 网关以 app 运行、每次 refresh/backfill 写 tmp 报 permission denied 的场景。
+func TestSaveAtomicFallsBackWhenDirUnwritable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root 无视目录写权限，无法复现不可写目录")
+	}
+	dir := t.TempDir()
+	fp := filepath.Join(dir, "workbuddy-u1.json")
+	a := &Auth{AccessToken: "old", UID: "u1", FilePath: fp}
+	if err := a.SaveAtomic(); err != nil {
+		t.Fatalf("initial save: %v", err)
+	}
+	// 目录去写权限 → 无法建 .tmp（但已有文件仍可 O_TRUNC 覆写）。
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(dir, 0o700)
+	a2 := &Auth{AccessToken: "new", UID: "u1", FilePath: fp}
+	if err := a2.SaveAtomic(); err != nil {
+		t.Fatalf("save with unwritable dir should fall back in-place, got: %v", err)
+	}
+	raw, err := os.ReadFile(fp)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	b, err := Parse(raw)
+	if err != nil || b.AccessToken != "new" {
+		t.Errorf("in-place fallback did not update content: %+v err=%v", b, err)
+	}
+}
+
 // TestLoadDirLoadsAllValid 不再按 region 过滤：所有可解析的 auth 文件都被加载，
 // 解析失败的文件静默跳过。
 func TestLoadDirLoadsAllValid(t *testing.T) {
@@ -155,6 +235,16 @@ func TestLoadDirBackfillsRealm(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// 目录去写权限：复现 bind mount 的 auths/ 归 root、网关以 app 运行的场景。
+	// 此前每次 LoadDir（运行期每 30s 重扫）都因 tmp 建不出而全员 "permission denied"
+	// 并刷屏；本次修复后应退化为原地重写并**成功**。非 root 才能复现（root 无视权限位）。
+	unwritable := os.Geteuid() != 0
+	if unwritable {
+		if err := os.Chmod(dir, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(dir, 0o700)
 	}
 
 	list, err := LoadDir(dir)

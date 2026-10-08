@@ -52,6 +52,15 @@ func TestClassify(t *testing.T) {
 		{400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, ErrBadParams},
 		{400, `Unmarshal chat params failed`, ErrBadParams},
 		{400, `{"code":11101,"msg":"x"}`, ErrBadParams},
+		// 11115 输入超上下文上限：确定性终态（换号无意义、不轮转），归 ErrContextOverflow。
+		// 实测原文含 requestId/extError 等字段，双 marker（code 11115 / "prompt is too long"）任一命中。
+		{400, `{"code":11115,"msg":"prompt is too long: 1049500 tokens > 1048576 maximum","requestId":"abc","extError":{"code":"invalid_request_error","message":"prompt is too long"}}`, ErrContextOverflow},
+		{400, `{"code":11115,"msg":"x"}`, ErrContextOverflow},
+		{400, `{"msg":"prompt is too long: 10 tokens > 5 maximum"}`, ErrContextOverflow},
+		// 11115 与 11101/11102/审核文案互斥：code 独立，不走错分支。
+		{400, `{"code":11115,"msg":"prompt is too long"}`, ErrContextOverflow},
+		// 裸 "11115" 撞在 requestId 上不算（与 11102 同口径：要 `"code":11115` 键值）。
+		{400, `{"requestId":"11115","msg":"bad request"}`, ErrClient},
 		{200, `quota exceeded`, ErrHardCredit},
 		// 账号级授权/配额故障（与 429 一起纳入轮换）：11140 request illegal = auth_forbidden
 		// 风控（需重登），14017 = quota_not_activated（试用未激活，需完成 register）。修复前
@@ -110,6 +119,33 @@ func TestContentBlockedClientMessage(t *testing.T) {
 		for _, leak := range []string{"11128", "account", "accounts", "账号", "upstream", "cooling", "no_healthy"} {
 			if strings.Contains(strings.ToLower(got), leak) {
 				t.Errorf("client message must not leak %q: %s", leak, got)
+			}
+		}
+	}
+}
+
+// TestContextOverflowClientMessage 11115 超上限的 400 文案：抽出「本次 tokens > 上限」
+// 两个数字（帮用户判断差多少），绝不泄露上游 code/账号/原文。
+func TestContextOverflowClientMessage(t *testing.T) {
+	cases := []struct {
+		body    string
+		wantSub string
+	}{
+		{`{"code":11115,"msg":"prompt is too long: 1049500 tokens > 1048576 maximum","requestId":"abc"}`, "1049500 tokens > 1048576 maximum"},
+		{`{"msg":"prompt is too long: 10 tokens > 5 maximum"}`, "10 tokens > 5 maximum"},
+		// 非预期文案：退化为固定描述，仍能给出可读的 400。
+		{`{"code":11115,"msg":"weird"}`, "prompt is too long"},
+		{"", "prompt is too long"},
+	}
+	for _, c := range cases {
+		got := ContextOverflowClientMessage(c.body)
+		if !strings.Contains(got, c.wantSub) {
+			t.Errorf("ContextOverflowClientMessage(%q)=%q want contains %q", c.body, got, c.wantSub)
+		}
+		// 不得泄露上游内部字段。
+		for _, leak := range []string{"11115", "requestId", "upstream", "no_healthy", "cooling", "account"} {
+			if strings.Contains(got, leak) {
+				t.Errorf("message must not leak %q: %s", leak, got)
 			}
 		}
 	}

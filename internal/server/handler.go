@@ -881,6 +881,19 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			if kind == upstream.ErrContextOverflow {
+				// 终态：输入超模型上下文上限（11115）。换号/换模型都会撞同一上限，
+				// 轮转纯属浪费；必须立即回 **400 invalid_request**，客户端（Claude Code）
+				// 才会触发自身上下文压缩。此前归 ErrClient → 末端 503 overloaded_error，
+				// 客户端按退避策略重试同一个超长请求 → 死循环（实测 20+ 分钟）。
+				// 不罚账号（applyErrorPolicy 对该类 no-op，与 ErrBadParams 同待遇）。
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, status)
+				fail(acct.UID)
+				writeOpenAIError(w, http.StatusBadRequest, "context_length_exceeded",
+					upstream.ContextOverflowClientMessage(string(respBody)))
+				st.status = http.StatusBadRequest
+				return
+			}
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, status)
 			fail(acct.UID)
@@ -975,7 +988,10 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
 		case upstream.ErrBadParams:
-			// 白名单透传：保留上游 11101 原文（客户端参数错误，帮助用户定位）。
+			// 确定性客户端错误 → 400（不是 503）：503 会被客户端当"服务端故障"重试同一个
+			// 畸形请求（死循环）。白名单透传 11101 原文（帮助定位参数）。
+			status = http.StatusBadRequest
+			code = "invalid_request_error"
 			msg = "upstream rejected request params: " + ue.Msg
 		}
 	}
@@ -997,6 +1013,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 //   - ErrContentBlocked → 不罚账号（无冷却/熔断/NoteError）；passthrough 首遇触发
 //     降级重试，最终仍拦则回 400 content_blocked（防火墙文案，不含账号/错误码）。
 //   - ErrBadParams → 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇），但仍轮转。
+//   - ErrContextOverflow → 不罚账号。与 ErrBadParams 同为"客户端请求体问题"，但由 handler
+//     在轮转循环内**终态返回 400、不再换号**（同一请求同一上限，换号无意义），故此处不轮转。
 //   - ErrServer → NoteError：喂单一连续失败计数器 fails + 累计错误 errTotal，
 //     达到 breakerThreshold 触发熔断（指数退避）。
 //   - ErrModelBlocked → BlockModelBackoff：(账号, 模型) 11102 负缓存避让（复用 modelCooldowns
@@ -1066,11 +1084,13 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 内容策略拦截：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
 		// passthrough 首遇由 chatCompletions 内降级重试处理；最终仍拦则回 400
 		// content_blocked（防火墙文案），不再轮转、不暴露账号/冷却/错误码。
-	case upstream.ErrBadParams:
-		// 请求体解析失败（400 + Unmarshal chat params failed / 11101）：发给上游的 body
-		// 有问题（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。换了账号照样 400，
-		// 不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）；但**仍然轮转**
-		// ——不同账号可能有不同的模型权限，值得换号再试一次。
+	case upstream.ErrBadParams, upstream.ErrContextOverflow:
+		// 客户端请求体问题，均不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）。
+		// 差异在轮转语义（由 handler 在循环内控制，此处只是同一 no-op 罚则的合流）：
+		//   - ErrBadParams（11101 解析失败）→ **仍然轮转**：不同账号可能有不同模型权限，
+		//     值得换号再试一次（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。
+		//   - ErrContextOverflow（11115 输入超上限）→ handler 内**终态 400、不轮转**：
+		//     同一请求同一上限，换号/换模型无意义。
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
 		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（6h 起、封顶

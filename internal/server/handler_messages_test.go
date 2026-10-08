@@ -449,6 +449,59 @@ func TestMessagesRotatesOn402(t *testing.T) {
 	}
 }
 
+// TestMessagesContextOverflowReturns400 上游 11115「prompt is too long」→ Anthropic 信封
+// **400 invalid_request_error（不是 503 overloaded_error）**，不轮转、不罚账号。
+// 根因：503 overloaded_error 会让 Claude Code 指数退避**重试同一个超长请求**（死循环）；
+// 400 才会触发自身上下文压缩。
+func TestMessagesContextOverflowReturns400(t *testing.T) {
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		return 400, `{"code":11115,"msg":"prompt is too long: 1049500 tokens > 1048576 maximum","requestId":"deadbeef"}`, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "u2", AccessToken: "at2", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: up, MaxBodyBytes: 1 << 20, AnthropicDefaultModel: "cn:auto"})
+	rec := postMessages(t, h, `{"model":"claude-sonnet-4-5","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s (want 400, not 503)", rec.Code, rec.Body.String())
+	}
+	var envelope struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, rec.Body.String())
+	}
+	if envelope.Error.Type != "invalid_request_error" {
+		t.Errorf("error.type=%q want invalid_request_error", envelope.Error.Type)
+	}
+	if !strings.Contains(envelope.Error.Message, "1049500 tokens > 1048576 maximum") {
+		t.Errorf("message should carry token numbers: %s", envelope.Error.Message)
+	}
+	for _, leak := range []string{"11115", "requestId", "deadbeef", "upstream"} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Errorf("4xx must not leak %q: %s", leak, rec.Body.String())
+		}
+	}
+	// 不轮转（只碰一个号一次）。
+	total := 0
+	for _, n := range calls {
+		total += n
+	}
+	if total != 1 {
+		t.Errorf("upstream called %d times (calls=%v); overflow must not rotate", total, calls)
+	}
+	if st, _ := p.Status("u1"); st.Cooling || st.Disabled || st.ErrTotal != 0 {
+		t.Errorf("u1 must not be penalized: %+v", st)
+	}
+}
+
 // TestMessagesCountTokens count_tokens：启发式正整数输出。
 func TestMessagesCountTokens(t *testing.T) {
 	up := newFakeUpstream(t, func(string) (int, string, bool) { return 200, sseOK, true })

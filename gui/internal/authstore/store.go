@@ -261,35 +261,81 @@ func (s *Store) Save(a *Account) error {
 
 // writeAtomic 原子替换（tmp + rename）；在 Docker 单文件挂载等无法 rename 的场景
 // 自动回退为原地写入，避免"凭证刷新成功却存不下去"。
-// 写入后按 SetOwner 配置调整属主，让网关容器（低权限用户）能读到。
+//
+// 属主处理策略（关掉「属主被改成 root → 网关下次写不动」这类事故）：
+//   - 显式配置了 SetOwner（>=0）：落盘后按配置 Chown（让网关低权限用户能读写）。
+//   - 未显式配置：**保留落盘前文件的属主**——rename 会把新文件（面板进程 uid）的属主
+//     带上去，在 bind mount 下会把属主从 app 改成 root，导致网关后续写入被拒
+//     （实测网关侧每 30s「realm backfill save: permission denied」刷屏、凭证刷新静默失败）。
+//   - 目标不存在（新建）：沿用 0600，属主即当前进程（无从"保留"）。
+//
+// 路径处理：先解引用符号链接（面板目录可能把凭证文件做成 symlink），写**链接目标**、
+// 保留符号链接本身。
+//
 // 调用方必须已持有 s.mu。
 func (s *Store) writeAtomic(path string, raw []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("创建目录: %w", err)
 	}
-	if _, err := fsutil.WriteFileAtomic(path, raw, 0o600); err != nil {
-		return err
+	// 解引用符号链接：写链名会把符号链接自身换成普通文件。
+	target := path
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		target = resolved
 	}
-	// 属主调整：仅当显式配置过（>=0）才生效。
-	// 失败不视为写凭证失败（凭证内容已落盘），但必须让调用方能感知——
-	// 因此返回错误，由上层决定是否降级为告警。
-	if s.ownerUID >= 0 || s.ownerGID >= 0 {
-		uid, gid := s.ownerUID, s.ownerGID
+	// 落盘前记录目标属主（若已存在），供"未显式配置"时保留。
+	var origUID, origGID = -1, -1
+	if fi, err := os.Stat(target); err == nil {
+		if uid, gid, ok := fsutil.FileOwner(fi); ok {
+			origUID, origGID = uid, gid
+		}
+	}
+
+	_, werr := fsutil.WriteFileAtomic(target, raw, 0o600)
+	if werr != nil {
+		// 目录不可写导致 tmp 建不出（rename 派生的回退也无能为力）：
+		// 退化为原地截断重写（文件本身常仍可写）。两路都失败才如实返回错误。
+		if oerr := overwriteInPlace(target, raw); oerr != nil {
+			return werr
+		}
+	}
+
+	// 属主调整：显式配置优先；否则保留原属主。
+	uid, gid := s.ownerUID, s.ownerGID
+	if uid < 0 && gid < 0 {
+		uid, gid = origUID, origGID
+	}
+	if uid >= 0 || gid >= 0 {
 		if uid < 0 {
 			uid = -1
 		}
 		if gid < 0 {
 			gid = -1
 		}
-		if err := os.Chown(path, uid, gid); err != nil {
-			return fmt.Errorf("凭证已写入，但调整文件属主为 %d:%d 失败（网关可能读不到该账号）: %w", uid, gid, err)
+		if err := os.Chown(target, uid, gid); err != nil {
+			// 仅当**显式**配置了属主时才视为失败（网关可能读不到该账号）；保留原属主的
+			// best-effort Chown 失败（非 root）不阻断——文件本就已是该属主。
+			if s.ownerUID >= 0 || s.ownerGID >= 0 {
+				return fmt.Errorf("凭证已写入，但调整文件属主为 %d:%d 失败（网关可能读不到该账号）: %w", uid, gid, err)
+			}
 		}
-		// 目录也要可进入：网关需要 stat/open 该目录下的文件。
-		if err := os.Chmod(filepath.Dir(path), 0o755); err != nil {
-			return fmt.Errorf("凭证已写入，但调整目录权限失败: %w", err)
-		}
+		// 目录可进入：网关需要 stat/open 该目录下的文件（已可写时 Chmod 无害）。
+		_ = os.Chmod(filepath.Dir(target), 0o755)
 	}
 	return nil
+}
+
+// overwriteInPlace 截断并原地重写凭证文件（目录不可写时的回退）。
+// 仅覆盖内容、不改 inode，故不影响属主/权限位。
+func overwriteInPlace(path string, raw []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(raw); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 // ErrNoCredentialFile 表示该账号没有本地凭证文件可删除。

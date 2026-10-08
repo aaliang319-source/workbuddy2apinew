@@ -339,6 +339,32 @@ func TestResponsesEndpointErrorPassthrough(t *testing.T) {
 	}
 }
 
+// TestResponsesEndpointContextOverflowReturns400 Responses 端点（Codex CLI）经
+// chatCompletions 委托，11115 超上限同样必须回 400（而非 503），且错误体原样透传
+// 给 Codex。回归：Codex 把 5xx 当可重试，400 才会触发自身上下文裁剪。
+func TestResponsesEndpointContextOverflowReturns400(t *testing.T) {
+	up := newFakeUpstream(t, func(string) (int, string, bool) {
+		return 400, `{"code":11115,"msg":"prompt is too long: 1049500 tokens > 1048576 maximum"}`, false
+	})
+	h := NewHandler(Config{
+		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),
+		Upstream: up,
+	})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/responses",
+		strings.NewReader(`{"model":"glm-5.2","input":"hi"}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d want 400 body=%s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if json.Unmarshal(rec.Body.Bytes(), &body) != nil || body["error"] == nil {
+		t.Errorf("body=%s want OpenAI error envelope", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "context_length_exceeded") {
+		t.Errorf("body=%s want code=context_length_exceeded", rec.Body.String())
+	}
+}
+
 func TestResponsesEndpointAuth(t *testing.T) {
 	h := NewHandler(Config{
 		Pool:     testPoolWith(&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999}),

@@ -241,11 +241,57 @@ func (a *Auth) SaveAtomic() error {
 	if err != nil {
 		return err
 	}
-	tmp := a.FilePath + ".tmp"
+	// 解引用符号链接：面板等外部写方的挂载目录可能把凭证文件做成指向别处的 symlink，
+	// 直接写链名会把符号链接本身换成普通文件（破坏其指向）。解析到真实路径再原子替换。
+	target := a.FilePath
+	if resolved, err := filepath.EvalSymlinks(a.FilePath); err == nil {
+		target = resolved
+	}
+	// 记录目标属主（若已存在）：原子替换的 rename 会带上**新文件**（本进程 uid）的属主，
+	// 在 bind mount 场景下会把属主从 app(10001) 改成 root/其他，导致下一次写入被拒
+	// （实测：「realm backfill save: permission denied」每 30s 刷屏，凭证刷新也静默失败）。
+	// 落盘后尽力还原原属主，保证文件始终对**原属主**可写（Chown 非 root 会 EPERM，忽略即可）。
+	var (
+		origUID = -1
+		origGID = -1
+	)
+	if fi, err := os.Stat(target); err == nil {
+		if uid, gid, ok := fileOwner(fi); ok {
+			origUID, origGID = uid, gid
+		}
+	}
+	tmp := target + ".tmp"
 	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		// tmp 写不进（多为**目录**不可写：bind mount 的 auths/ 归 root、网关以 app 运行，
+		// 8 账号 realm backfill 每 30s 全员 permission denied）。凭证文件本身常仍可写
+		// （app 自建、属主 app），退化为「原地截断重写」——凭证 JSON 小，truncate+write
+		// 近似原子，换取"刷新不再静默失败"。两路都失败才如实返回错误。
+		if werr := overwriteInPlace(target, raw); werr == nil {
+			return nil
+		}
+		return err // 报告原始（tmp 写入）错误：目录不可写是最可能的根因
+	}
+	if err := os.Rename(tmp, target); err != nil {
 		return err
 	}
-	return os.Rename(tmp, a.FilePath)
+	if origUID >= 0 || origGID >= 0 {
+		_ = os.Chown(target, origUID, origGID) // 非 root 对非自身属主会 EPERM：不阻断落盘
+	}
+	return nil
+}
+
+// overwriteInPlace 截断并原地重写凭证文件（目录不可写时的回退，见 SaveAtomic）。
+// 仅覆盖内容、不改 inode，故不影响属主/权限位；目标不存在时按 0600 新建。
+func overwriteInPlace(path string, raw []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.Write(raw); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 // AuthFileGlob auth 文件的统一 glob 模式（宽侧：workbuddy*.json）。
@@ -298,7 +344,9 @@ func LoadDir(dir string) ([]*Auth, error) {
 		if a.RealmStored() == "" {
 			if changed, r := a.BackfillRealm(); changed {
 				if err := a.SaveAtomic(); err != nil {
-					log.Printf("WARN: auth %s realm backfill save: %v", logfmt.UID8(a.UID), err)
+					// 首次告警即可定位；WarnOnce 避免运行期 auths 自动重扫（每 30s）在
+					// bind mount 属主错配这类**持续性**写失败下把日志刷屏。
+					logfmt.WarnOnce("auth-realm-backfill-save", "WARN: auth %s realm backfill save: %v", logfmt.UID8(a.UID), err)
 				} else if r == "global" {
 					log.Printf("auth %s 存量迁移: 补 realm=global（domain=%s）", logfmt.UID8(a.UID), a.Domain)
 				}

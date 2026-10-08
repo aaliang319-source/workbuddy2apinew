@@ -24,17 +24,18 @@ import (
 type ErrKind int
 
 const (
-	ErrNone           ErrKind = iota // 成功
-	ErrHardCredit                    // 余额不足（402 或 body 关键词）→ 长冷却
-	ErrSoftRate                      // 429 软限流 → 短冷却
-	ErrSessionDead                   // 401 + 12153 offline session 失效 → 禁用
-	ErrNotFound                      // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
-	ErrServer                        // 5xx 上游故障
-	ErrContentBlocked                // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
-	ErrBadParams                     // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 不罚账号，仍轮转
-	ErrAccountFault                  // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
-	ErrModelBlocked                  // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
-	ErrClient                        // 其他 4xx / 业务错误
+	ErrNone            ErrKind = iota // 成功
+	ErrHardCredit                     // 余额不足（402 或 body 关键词）→ 长冷却
+	ErrSoftRate                       // 429 软限流 → 短冷却
+	ErrSessionDead                    // 401 + 12153 offline session 失效 → 禁用
+	ErrNotFound                       // 404 上游偶发 → 短冷却，不累计错误计数（防雪崩）
+	ErrServer                         // 5xx 上游故障
+	ErrContentBlocked                 // 内容策略拦截（400 + 审核文案）→ 不罚账号，走降级重试
+	ErrBadParams                      // 请求体解析失败（400 + Unmarshal chat params failed / 11101）→ 不罚账号，仍轮转
+	ErrAccountFault                   // 账号级授权/配额故障（11140 request illegal / 14017 trial not activated）→ 冷却轮换，不无限重试
+	ErrModelBlocked                   // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
+	ErrClient                         // 其他 4xx / 业务错误
+	ErrContextOverflow                // 11115「prompt is too long」→ 输入超模型上下文上限：不罚号、不轮转，终态 400
 )
 
 func (k ErrKind) String() string {
@@ -59,6 +60,8 @@ func (k ErrKind) String() string {
 		return "model_blocked"
 	case ErrClient:
 		return "client"
+	case ErrContextOverflow:
+		return "context_overflow"
 	default:
 		return "none"
 	}
@@ -210,6 +213,40 @@ func contentBlockedKeyword(body string) string {
 	}
 	return contentBlockedFallbackKeyword
 }
+
+// contextOverflowClientMsg 输入超上限返回给调用方的固定文案模板（%s 填「本次 tokens > 上限」）。
+const contextOverflowClientMsg = "输入超出模型上下文上限（%s）：请缩减对话历史或输入后重试（建议触发客户端上下文压缩）。"
+
+// ContextOverflowClientMessage 把上游 11115 答复改写为网关口径的 400 文案。
+// 仅保留「本次 tokens > 上限」两个数字（帮用户判断差多少），绝不透传上游 code/账号/原文。
+// 数字抽不到（非预期文案）时退化为不含数字的固定描述。
+func ContextOverflowClientMessage(body string) string {
+	if m := contextOverflowRe.FindStringSubmatch(body); len(m) == 3 {
+		return fmt.Sprintf(contextOverflowClientMsg, m[1]+" tokens > "+m[2]+" maximum")
+	}
+	return fmt.Sprintf(contextOverflowClientMsg, "prompt is too long")
+}
+
+// contextOverflowRule 输入超上下文上限关键词：HTTP 400 + 上游
+// `{"code":11115,"msg":"prompt is too long: 1049500 tokens > 1048576 maximum"}`。
+//
+// 定位：这是**客户端请求本身太大**（对话历史 + 输入超模型上下文窗口），不是账号问题
+// ——该账号余额健康、未限流、session 未死，换任何账号都会撞同一上限。与 ErrBadParams
+// 同族（不罚账号）但更进一步：换号纯属浪费（同一请求同一上限），必须**终态 400**、
+// 不再轮转、不换模型（回退模型上限只会更小）。归此类的直接后果由 handler 侧
+// 映射为 400 context_length_exceeded，客户端（Claude Code）据此触发自身的上下文压缩，
+// 而不是像 503 overloaded_error 那样指数退避重试同一个超长请求（实测死循环 20+ 分钟）。
+//
+// 双 marker 宁缺毋滥：code 11115 是上游确定性答复；"prompt is too long" 是同一答复的
+// 稳定文案（中文/其他语系若出现，仍可由 code 命中）。matchFold 大小写不敏感双通道。
+var contextOverflowRule = errorRule{kind: ErrContextOverflow, mode: matchFold, patterns: []string{
+	`"code":11115`,
+	"prompt is too long",
+}}
+
+// contextOverflowRe 抽取上游「too long」答复里的 token 数与上限（"…1049500 tokens > 1048576 maximum"）。
+// 仅用于给调用方一条信息量更大的 400 文案，抽不到则退化为固定文案。
+var contextOverflowRe = regexp.MustCompile(`(?i)(\d+)\s*tokens?\s*>\s*(\d+)`)
 
 // badParamsRule 请求体解析失败关键词（issue #41 连带）：HTTP 400 + 上游
 // "Unmarshal chat params failed..."（code 11101）。这是"发给上游的 body 有问题"，
@@ -421,6 +458,11 @@ func Classify(status int, body string) ErrKind {
 	if status >= 400 {
 		if contentBlockedRule.hit(body, lower) {
 			return ErrContentBlocked
+		}
+		// 11115 输入超上限：先于 ErrBadParams（同为"客户端请求体问题"族，其中 11115
+		// 语义更具体——确定性的上限溢出，终态 400 不轮转）。见 contextOverflowRule。
+		if contextOverflowRule.hit(body, lower) {
+			return ErrContextOverflow
 		}
 		if badParamsRule.hit(body, lower) {
 			return ErrBadParams

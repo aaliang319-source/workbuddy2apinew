@@ -256,10 +256,10 @@ func TestChatBadParamsRotatesWithoutPenalty(t *testing.T) {
 	}
 }
 
-// TestChatAllBadParams503CarriesUpstreamBody 全部账号都 11101 时 503 文案必须包含
-// 上游原始 11101 信息（不再是空洞的 no_healthy_account）。
-// 现状即透传 lastErr.Error()（含上游 body），本测试把它锁定为回归。
-func TestChatAllBadParams503CarriesUpstreamBody(t *testing.T) {
+// TestChatAllBadParams400CarriesUpstreamBody 全部账号都 11101（请求体解析失败）时，
+// 末端必须回确定性 **400 invalid_request_error**（不是 503——503 会被客户端当服务端故障
+// 重试同一个畸形 JSON，死循环），且文案包含上游 11101 原文（帮用户定位参数）。
+func TestChatAllBadParams400CarriesUpstreamBody(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		return 400, `{"code":11101,"msg":"Unmarshal chat params failed with error: unexpected EOF"}`, false
 	})
@@ -267,12 +267,80 @@ func TestChatAllBadParams503CarriesUpstreamBody(t *testing.T) {
 	h := NewHandler(Config{Pool: p, Upstream: up})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
-	if rec.Code != 503 {
-		t.Fatalf("code=%d body=%s (want 503)", rec.Code, rec.Body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s (want 400, not 503)", rec.Code, rec.Body)
 	}
-	body := rec.Body.String()
-	if !strings.Contains(body, "11101") || !strings.Contains(body, "Unmarshal chat params failed") {
-		t.Errorf("503 message should carry upstream 11101 info: %s", body)
+	var e struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatalf("resp not json: %v body=%s", err, rec.Body)
+	}
+	if e.Error.Code != "invalid_request_error" {
+		t.Errorf("code=%q want invalid_request_error", e.Error.Code)
+	}
+	if !strings.Contains(e.Error.Message, "11101") || !strings.Contains(e.Error.Message, "Unmarshal chat params failed") {
+		t.Errorf("400 message should carry upstream 11101 info: %s", e.Error.Message)
+	}
+}
+
+// TestChatContextOverflowReturns400 上游 11115「prompt is too long」→ 终态 400
+// context_length_exceeded，**不轮转、不罚账号**。端到端回归本次事故：此前归 ErrClient →
+// 末端 503 overloaded_error，Claude Code 按退避策略重试同一个超长请求 → 死循环。
+// 关键断言 bad 账号只被调用 1 次（不换号）、账号完好、4xx 不是 5xx。
+func TestChatContextOverflowReturns400(t *testing.T) {
+	calls := map[string]int{}
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls[authz]++
+		return 400, `{"code":11115,"msg":"prompt is too long: 1049500 tokens > 1048576 maximum","requestId":"deadbeef","extError":{"code":"invalid_request_error","message":"prompt is too long"}}`, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "u2", AccessToken: "at2", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s (want 400, not 503)", rec.Code, rec.Body)
+	}
+	var e struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatalf("resp not json: %v body=%s", err, rec.Body)
+	}
+	if e.Error.Code != "context_length_exceeded" {
+		t.Errorf("code=%q want context_length_exceeded", e.Error.Code)
+	}
+	if !strings.Contains(e.Error.Message, "1049500 tokens > 1048576 maximum") {
+		t.Errorf("message should carry token numbers: %s", e.Error.Message)
+	}
+	// 不得泄露上游内部字段/错误码。
+	for _, leak := range []string{"11115", "requestId", "deadbeef", "upstream"} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Errorf("4xx must not leak %q: %s", leak, rec.Body)
+		}
+	}
+	// 不轮转：只碰了第一个账号一次（换号撞同一上限，纯属浪费）。
+	total := 0
+	for _, n := range calls {
+		total += n
+	}
+	if total != 1 {
+		t.Errorf("upstream called %d times (calls=%v); overflow must not rotate", total, calls)
+	}
+	// 不罚账号。
+	for _, uid := range []string{"u1", "u2"} {
+		if st, _ := p.Status(uid); st.Cooling || st.Disabled || st.ErrTotal != 0 || st.BreakerFails != 0 {
+			t.Errorf("%s must not be penalized: %+v", uid, st)
+		}
 	}
 }
 

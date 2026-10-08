@@ -344,6 +344,40 @@ func TestChatContextOverflowReturns400(t *testing.T) {
 	}
 }
 
+// TestChatInvalidToolCallReturns400 上游 11129「invalid function call parameters」→ 终态 400
+// invalid_request_error，不轮转、不罚账号。同为确定性客户端请求体错误，503 会被客户端重试。
+func TestChatInvalidToolCallReturns400(t *testing.T) {
+	calls := 0
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		calls++
+		return 400, `{"code":11129,"msg":"invalid function call parameters","requestId":"deadbeef","extError":{"code":"invalid_function_parameters","message":"invalid function call parameters"}}`, false
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "u1", AccessToken: "at1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "u2", AccessToken: "at2", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"glm-5.2","messages":[]}`)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("code=%d body=%s (want 400, not 503)", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "invalid tool call parameters") {
+		t.Errorf("body=%s want invalid tool call message", rec.Body)
+	}
+	for _, leak := range []string{"11129", "requestId", "deadbeef", "upstream"} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Errorf("400 must not leak %q: %s", leak, rec.Body)
+		}
+	}
+	if calls != 1 {
+		t.Errorf("upstream called %d times; invalid tool call must not rotate", calls)
+	}
+	if st, _ := p.Status("u1"); st.Cooling || st.Disabled || st.ErrTotal != 0 {
+		t.Errorf("u1 must not be penalized: %+v", st)
+	}
+}
+
 func TestChatNonStreamAggregates(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
 		if authz != "Bearer at1" {

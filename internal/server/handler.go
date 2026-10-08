@@ -894,6 +894,16 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			if kind == upstream.ErrInvalidToolCall {
+				// 终态：工具调用参数非法（11129）。同为确定性客户端请求体问题，换号/换模型
+				// 都会撞同一非法参数 → 立即 400，不轮转（否则末端 503 被当服务端故障重试）。
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, status)
+				fail(acct.UID)
+				writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error",
+					upstream.InvalidToolCallClientMessage(string(respBody)))
+				st.status = http.StatusBadRequest
+				return
+			}
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, status)
 			fail(acct.UID)
@@ -1084,13 +1094,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 内容策略拦截：内容问题非账号问题，不罚账号（无冷却/熔断/NoteError）。
 		// passthrough 首遇由 chatCompletions 内降级重试处理；最终仍拦则回 400
 		// content_blocked（防火墙文案），不再轮转、不暴露账号/冷却/错误码。
-	case upstream.ErrBadParams, upstream.ErrContextOverflow:
+	case upstream.ErrBadParams, upstream.ErrContextOverflow, upstream.ErrInvalidToolCall:
 		// 客户端请求体问题，均不罚账号（无冷却/熔断/NoteError，同 ErrContentBlocked 待遇）。
 		// 差异在轮转语义（由 handler 在循环内控制，此处只是同一 no-op 罚则的合流）：
 		//   - ErrBadParams（11101 解析失败）→ **仍然轮转**：不同账号可能有不同模型权限，
 		//     值得换号再试一次（网关截断已由 413 消灭，剩余为客户端畸形 JSON）。
 		//   - ErrContextOverflow（11115 输入超上限）→ handler 内**终态 400、不轮转**：
 		//     同一请求同一上限，换号/换模型无意义。
+		//   - ErrInvalidToolCall（11129 工具参数非法）→ 同 ErrContextOverflow：终态 400、不轮转。
 	case upstream.ErrModelBlocked:
 		// 11102「该后端无此模型」：(账号, 模型) 负缓存避让。复用 modelCooldowns 机制
 		// （与 6004 同域），写 modelCooldowns[model]，Until 为指数退避 TTL（6h 起、封顶

@@ -36,6 +36,7 @@ const (
 	ErrModelBlocked                   // 11102「该后端无此模型」→ (账号,模型) 负缓存避让，切模型/切账号
 	ErrClient                         // 其他 4xx / 业务错误
 	ErrContextOverflow                // 11115「prompt is too long」→ 输入超模型上下文上限：不罚号、不轮转，终态 400
+	ErrInvalidToolCall                // 11129「invalid function call parameters」→ 工具调用参数非法：不罚号、不轮转，终态 400
 )
 
 func (k ErrKind) String() string {
@@ -62,6 +63,8 @@ func (k ErrKind) String() string {
 		return "client"
 	case ErrContextOverflow:
 		return "context_overflow"
+	case ErrInvalidToolCall:
+		return "invalid_tool_call"
 	default:
 		return "none"
 	}
@@ -214,17 +217,22 @@ func contentBlockedKeyword(body string) string {
 	return contentBlockedFallbackKeyword
 }
 
-// contextOverflowClientMsg 输入超上限返回给调用方的固定文案模板（%s 填「本次 tokens > 上限」）。
-const contextOverflowClientMsg = "输入超出模型上下文上限（%s）：请缩减对话历史或输入后重试（建议触发客户端上下文压缩）。"
+// contextOverflowClientMsg 输入超上限返回给调用方的文案模板（%s 填「N tokens > M maximum」）。
+//
+// **必须保留上游那句 canonical 英文 "prompt is too long"**：Claude Code / codeg 正是按该
+// 子串判定「上下文溢出 → 触发自动压缩」。此前把它改写成中文文案后客户端匹配不到，继续重试
+// 同一个超长请求（实测每秒轰 ~1.1M token 到上游，正是封号风险的来源）。gateway 只做协议
+// 翻译、不改判据：这里逐字沿用 Anthropic 的措辞，数字（本次 tokens / 上限）照抄上游。
+const contextOverflowClientMsg = "prompt is too long: %s"
 
-// ContextOverflowClientMessage 把上游 11115 答复改写为网关口径的 400 文案。
-// 仅保留「本次 tokens > 上限」两个数字（帮用户判断差多少），绝不透传上游 code/账号/原文。
-// 数字抽不到（非预期文案）时退化为不含数字的固定描述。
+// ContextOverflowClientMessage 生成 400 文案：`prompt is too long: N tokens > M maximum`。
+// 数字抽不到（非预期文案）时退化为 canonical 短句 "prompt is too long"，仍然可被客户端识别。
+// 绝不透传上游 code/requestId/extError。
 func ContextOverflowClientMessage(body string) string {
 	if m := contextOverflowRe.FindStringSubmatch(body); len(m) == 3 {
 		return fmt.Sprintf(contextOverflowClientMsg, m[1]+" tokens > "+m[2]+" maximum")
 	}
-	return fmt.Sprintf(contextOverflowClientMsg, "prompt is too long")
+	return "prompt is too long"
 }
 
 // contextOverflowRule 输入超上下文上限关键词：HTTP 400 + 上游
@@ -243,6 +251,25 @@ var contextOverflowRule = errorRule{kind: ErrContextOverflow, mode: matchFold, p
 	`"code":11115`,
 	"prompt is too long",
 }}
+
+// invalidToolCallRule 工具调用参数非法：HTTP 400 + 上游
+// `{"code":11129,"msg":"invalid function call parameters","extError":{"code":"invalid_function_parameters",...}}`。
+//
+// 定位：与 11101/11115 同族——**客户端请求体问题**（模型生成的 tool_calls 参数 schema 非法，
+// 客户端回放历史后上游拒收），非账号问题。换号/换模型都会撞同一非法参数，必须**终态 400**、
+// 不轮转（否则末端 503 会被客户端当服务端故障重试，实测 ~1.2s 一次刷屏，污染整个轮换链路
+// 并给上游持续施压）。双 marker（code 11129 / extError.code"invalid_function_parameters"）任一命中。
+var invalidToolCallRule = errorRule{kind: ErrInvalidToolCall, mode: matchFold, patterns: []string{
+	`"code":11129`,
+	"invalid_function_parameters",
+}}
+
+// invalidToolCallClientMsg 工具调用参数非法的固定文案（OpenAI 兼容措辞）。不含 tool_call_id
+// ——上游不告诉我们是哪一个，不编造 id 以免误导。
+const invalidToolCallClientMsg = "invalid tool call parameters: the model produced a function call with parameters that do not match the tool schema; please retry with a corrected tool definition or drop the malformed tool call"
+
+// InvalidToolCallClientMessage 返回工具调用参数非法的 400 文案（固定文案，不透传上游 code/requestId）。
+func InvalidToolCallClientMessage(string) string { return invalidToolCallClientMsg }
 
 // contextOverflowRe 抽取上游「too long」答复里的 token 数与上限（"…1049500 tokens > 1048576 maximum"）。
 // 仅用于给调用方一条信息量更大的 400 文案，抽不到则退化为固定文案。
@@ -463,6 +490,10 @@ func Classify(status int, body string) ErrKind {
 		// 语义更具体——确定性的上限溢出，终态 400 不轮转）。见 contextOverflowRule。
 		if contextOverflowRule.hit(body, lower) {
 			return ErrContextOverflow
+		}
+		// 11129 工具调用参数非法：同为确定性客户端错误，终态 400 不轮转。见 invalidToolCallRule。
+		if invalidToolCallRule.hit(body, lower) {
+			return ErrInvalidToolCall
 		}
 		if badParamsRule.hit(body, lower) {
 			return ErrBadParams

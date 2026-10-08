@@ -319,6 +319,15 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 				st.status = http.StatusBadRequest
 				return
 			}
+			if kind == upstream.ErrInvalidToolCall {
+				// 终态：工具调用参数非法（11129）。同为确定性客户端请求体问题 → 立即 400，不轮转。
+				h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, status)
+				fail(acct.UID)
+				writeAnthropicError(w, http.StatusBadRequest,
+					upstream.InvalidToolCallClientMessage(string(respBody)))
+				st.status = http.StatusBadRequest
+				return
+			}
 			lastErr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
 			h.applyErrorPolicy(acct.UID, kind, string(respBody), bareModel, status)
 			fail(acct.UID)

@@ -61,6 +61,10 @@ func TestClassify(t *testing.T) {
 		{400, `{"code":11115,"msg":"prompt is too long"}`, ErrContextOverflow},
 		// 裸 "11115" 撞在 requestId 上不算（与 11102 同口径：要 `"code":11115` 键值）。
 		{400, `{"requestId":"11115","msg":"bad request"}`, ErrClient},
+		// 11129 工具调用参数非法：确定性终态（不轮转），归 ErrInvalidToolCall。
+		{400, `{"code":11129,"msg":"invalid function call parameters","requestId":"abc","extError":{"code":"invalid_function_parameters","message":"invalid function call parameters"}}`, ErrInvalidToolCall},
+		{400, `{"code":11129,"msg":"x"}`, ErrInvalidToolCall},
+		{400, `{"extError":{"code":"invalid_function_parameters"}}`, ErrInvalidToolCall},
 		{200, `quota exceeded`, ErrHardCredit},
 		// 账号级授权/配额故障（与 429 一起纳入轮换）：11140 request illegal = auth_forbidden
 		// 风控（需重登），14017 = quota_not_activated（试用未激活，需完成 register）。修复前
@@ -124,16 +128,19 @@ func TestContentBlockedClientMessage(t *testing.T) {
 	}
 }
 
-// TestContextOverflowClientMessage 11115 超上限的 400 文案：抽出「本次 tokens > 上限」
-// 两个数字（帮用户判断差多少），绝不泄露上游 code/账号/原文。
+// TestContextOverflowClientMessage 11115 超上限的 400 文案：**必须逐字保留 canonical
+// 英文 "prompt is too long"**——Claude Code / codeg 按该子串判定上下文溢出并触发自动压缩。
+//
+// 回归（事故二次）：曾把文案改写成中文「输入超出模型上下文上限…」，客户端匹配不到 →
+// 继续重试同一个超长请求 → 每秒轰 ~1.1M token 到上游（封号风险）。
 func TestContextOverflowClientMessage(t *testing.T) {
 	cases := []struct {
 		body    string
 		wantSub string
 	}{
-		{`{"code":11115,"msg":"prompt is too long: 1049500 tokens > 1048576 maximum","requestId":"abc"}`, "1049500 tokens > 1048576 maximum"},
-		{`{"msg":"prompt is too long: 10 tokens > 5 maximum"}`, "10 tokens > 5 maximum"},
-		// 非预期文案：退化为固定描述，仍能给出可读的 400。
+		{`{"code":11115,"msg":"prompt is too long: 1049500 tokens > 1048576 maximum","requestId":"abc"}`, "prompt is too long: 1049500 tokens > 1048576 maximum"},
+		{`{"msg":"prompt is too long: 10 tokens > 5 maximum"}`, "prompt is too long: 10 tokens > 5 maximum"},
+		// 非预期文案：退化为 canonical 短句，仍可被客户端识别。
 		{`{"code":11115,"msg":"weird"}`, "prompt is too long"},
 		{"", "prompt is too long"},
 	}
@@ -141,6 +148,10 @@ func TestContextOverflowClientMessage(t *testing.T) {
 		got := ContextOverflowClientMessage(c.body)
 		if !strings.Contains(got, c.wantSub) {
 			t.Errorf("ContextOverflowClientMessage(%q)=%q want contains %q", c.body, got, c.wantSub)
+		}
+		// 触发自动压缩的判据子串必须在场（本轮回归的核心断言）。
+		if !strings.Contains(got, "prompt is too long") {
+			t.Errorf("message must contain the canonical trigger %q: %s", "prompt is too long", got)
 		}
 		// 不得泄露上游内部字段。
 		for _, leak := range []string{"11115", "requestId", "upstream", "no_healthy", "cooling", "account"} {

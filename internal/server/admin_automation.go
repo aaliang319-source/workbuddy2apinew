@@ -118,6 +118,10 @@ type scheduleBody struct {
 	// ActivityReportCount 当前不支持热更新（需重建 Scheduler），仅为契约完整性保留；
 	// 显式传值会被忽略（面板需标注"改动后需重启"）。
 	ActivityReportCount *int `json:"activity_report_count"`
+	// JitterMinutes 抖动跨度（分钟），0 = 未配置（回落默认 55）；上限 55。
+	// JitterDisabled 明确要求准点执行。两者都可热更新——改完立刻重掷落点。
+	JitterMinutes  *int  `json:"jitter_minutes"`
+	JitterDisabled *bool `json:"jitter_disabled"`
 }
 
 // toSpec 基于当前内存排程合并请求字段，产出新规格。
@@ -158,6 +162,12 @@ func (b *scheduleBody) toSpec(cur scheduler.ScheduleSpec) scheduler.ScheduleSpec
 	}
 	if b.CatEnabled != nil {
 		spec.CatDisabled = !*b.CatEnabled
+	}
+	if b.JitterMinutes != nil {
+		spec.JitterSpanMinutes = *b.JitterMinutes
+	}
+	if b.JitterDisabled != nil {
+		spec.JitterDisabled = *b.JitterDisabled
 	}
 	return spec
 }

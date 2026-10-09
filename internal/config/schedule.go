@@ -38,6 +38,14 @@ type Schedule struct {
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int `json:"activity_report_count"`
+
+	// JitterMinutes 每个小时窗口内的随机抖动跨度（分钟）。触发时刻 = 所配小时 +
+	// [1s, 跨度] 内的随机偏移，**整点永不被选中**（:00 是自动化脚本的共同指纹）。
+	// 0/缺省 → 默认 55；上限 55（跨度 60 会让落点逼近下一个整点，等于跳出所配小时；
+	// 对夜猫任务还会顶到 08:00:00，落在 within_night_window() 的窗口之外）。
+	JitterMinutes int `json:"jitter_minutes"`
+	// JitterDisabled 明确要求准点执行（跨度归 0），用于需要精确时刻的排障场景。
+	JitterDisabled bool `json:"jitter_disabled"`
 	// 猫猫旅行已退役 travel_interval_minutes：旅行现为独立排程（travel_hours）。
 	// 旧 config 里的该键因 JSON 未知字段而自然忽略，不报错。
 }
@@ -52,9 +60,9 @@ func DefaultSchedule() Schedule {
 		CheckinHours:        []int{9, 21},
 		TravelHours:         []int{9, 21},
 		ActivityHours:       []int{10},
-		KeepaliveHours:       []int{22},
-		SchoolHours:          []int{12},
-		CatHours:             []int{1},
+		KeepaliveHours:      []int{22},
+		SchoolHours:         []int{12},
+		CatHours:            []int{1},
 		CheckinEnabled:      true,
 		TravelEnabled:       true,
 		ActivityEnabled:     true,

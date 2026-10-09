@@ -58,10 +58,9 @@ func TestNextWakeSchoolSlot(t *testing.T) {
 		KeepaliveDisabled: true,
 		SchoolHours:       []int{12},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 14, 11, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 14, 12, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（school 12:00 独立时点）", at, want)
-	}
+	now := time.Date(2026, 9, 14, 11, 0, 0, 0, time.Local)
+	at, kinds := s.nextWake(now)
+	assertJittered(t, "school 12 点独立时点", at, now, 12)
 	if len(kinds) != 1 || kinds[0] != taskSchool {
 		t.Errorf("kinds=%v want [school]", kinds)
 	}
@@ -76,12 +75,47 @@ func TestNextWakeCatSlot(t *testing.T) {
 		KeepaliveDisabled: true,
 		CatHours:          []int{1},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 14, 23, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 15, 1, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（cat 01:00 独立时点）", at, want)
-	}
+	now := time.Date(2026, 9, 14, 23, 0, 0, 0, time.Local)
+	at, kinds := s.nextWake(now)
+	assertJittered(t, "cat 次日 01 点独立时点", at, now.AddDate(0, 0, 1), 1)
 	if len(kinds) != 1 || kinds[0] != taskCat {
 		t.Errorf("kinds=%v want [cat]", kinds)
+	}
+	// 夜猫的硬约束：落点必须在 23:00-08:00 CST 窗口内，否则脚本侧 skip pending 白跑。
+	assertCatInNightWindow(t, at)
+}
+
+// assertCatInNightWindow 断言 t 落在夜猫窗口 [23:00, 08:00) 内——与
+// scripts/task_runner.py 的 within_night_window() 同口径。抖动一旦放宽到跨小时，
+// 这里会先炸，避免问题只在运行时的 "skip pending" 日志里暴露。
+func assertCatInNightWindow(t *testing.T, at time.Time) {
+	t.Helper()
+	h := at.Hour()
+	if !(h >= catWindowStartHour || h < catWindowEndHour) {
+		t.Errorf("cat 触发时刻 %v（%d 点）出夜猫窗口 [23:00,08:00)——脚本会 skip pending", at, h)
+	}
+}
+
+// TestNextFireCatStaysInNightWindow 夜猫窗口不变量：任何 cat_hours 配置下，
+// 抖动后的落点都不得越窗。这是本次加抖动最容易踩坏的一条约束。
+func TestNextFireCatStaysInNightWindow(t *testing.T) {
+	for day := 1; day <= 28; day++ {
+		for _, h := range []int{1, 3, 23} {
+			// 从窗口内的前一个小时起算。
+			prev := h - 1
+			if h == 23 {
+				prev = 22
+			}
+			now := time.Date(2026, 10, day, prev, 30, 0, 0, time.Local)
+			at := testRnd().nextFire(now, []int{h})
+			if at.IsZero() {
+				t.Fatalf("day=%d h=%d: 无 cat 时点", day, h)
+			}
+			if at.Hour() != h {
+				t.Fatalf("day=%d h=%d: next=%v 不在目标小时", day, h, at)
+			}
+			assertCatInNightWindow(t, at)
+		}
 	}
 }
 
@@ -97,10 +131,9 @@ func TestNextWakeSchoolCatDisabled(t *testing.T) {
 		SchoolDisabled:    true,
 		CatDisabled:       true,
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 14, 8, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 14, 21, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（school/cat 禁用 → 只有签到 21:00）", at, want)
-	}
+	now := time.Date(2026, 9, 14, 8, 0, 0, 0, time.Local)
+	at, kinds := s.nextWake(now)
+	assertJittered(t, "school/cat 禁用 → 只有签到 21 点", at, now, 21)
 	if len(kinds) != 1 || kinds[0] != taskCheckin {
 		t.Errorf("kinds=%v want [checkin]", kinds)
 	}

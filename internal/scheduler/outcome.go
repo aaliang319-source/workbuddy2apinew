@@ -69,6 +69,11 @@ type ScheduleSpec struct {
 	KeepaliveDisabled bool
 	SchoolDisabled    bool
 	CatDisabled       bool
+
+	// JitterSpanMinutes 每个小时窗口内的抖动跨度（分钟）；<=0 走默认。
+	// JitterDisabled 明确要求准点执行（跨度归 0），用于需要精确时刻的排障场景。
+	JitterSpanMinutes int
+	JitterDisabled    bool
 }
 
 // Spec 从 Config 提取排程规格（Hours 已由 New 回落默认）。
@@ -86,42 +91,72 @@ func (c Config) Spec() ScheduleSpec {
 		KeepaliveDisabled: c.KeepaliveDisabled,
 		SchoolDisabled:    c.SchoolDisabled,
 		CatDisabled:       c.CatDisabled,
+		JitterSpanMinutes: c.JitterSpanMinutes,
+		JitterDisabled:    c.JitterDisabled,
 	}
+}
+
+// JitterSpan 返回本规格的抖动跨度（分钟）：JitterDisabled 时为 0（准点），
+// 否则归一为非正 → 默认、超限 → 上限（与 NewRandomizer/SetSpanMinutes 同口径）。
+func (s ScheduleSpec) JitterSpan() int {
+	if s.JitterDisabled {
+		return 0
+	}
+	if s.JitterSpanMinutes <= 0 {
+		return jitterSpanDefault
+	}
+	if s.JitterSpanMinutes > jitterSpanMax {
+		return jitterSpanMax
+	}
+	return s.JitterSpanMinutes
 }
 
 // Spec 返回当前排程规格（Runner 接口用；Scheduler 的 cfg 在生命周期内不变）。
 func (s *Scheduler) Spec() ScheduleSpec { return s.cfg.Spec() }
 
-// NextWake 纯函数：返回 now 之后最近的唤醒时刻，以及该时刻需要执行的全部任务类型。
+// NextWake 返回 now 之后最近的唤醒时刻与该时刻需执行的全部任务类型。
 //
-// 多类任务配到同一小时（如签到与旅行都含 9）时该时刻一并执行；显式禁用的任务
-// 不进候选（nextFire 对其零值返回零时间，这里再跳过零时点）。
-// 六类全部禁用 → 返回零时间与 nil（调用方据此不空转）。
+// **每次调用都重新掷随机数**（抖动是每次排定现滚的，不是按日期哈希出来的固定偏移）——
+// 因此它不再是纯函数，且**只能由定时循环在排定时调用**。面板要把「下次执行」显示给
+// 用户，必须读定时循环记下的落点（Randomizer.Scheduled），否则会掷出另一个随机值，
+// 显示的时刻与真实执行不符。
 //
-// 这是排程语义的唯一来源：内部 nextWake 只是把 Kind 映射回 taskKind。
-func NextWake(now time.Time, spec ScheduleSpec) (time.Time, []Kind) {
+// 各任务族各自掷各小时的落点，因此"配在同一小时"的不同任务族通常不再同刻触发——
+// 错开正是目的（同刻并发是最易识别的脚本特征）；偶发相撞时仍一并执行。
+// 显式禁用的任务不进候选；六类全禁用 → 返回零时间与 nil（调用方据此不空转）。
+//
+// 滚动由调用方传入的 Randomizer 承担；r 为 nil 时按"准点"处理（无抖动），
+// 便于只关心"哪个小时"的调用方与老测试沿用。
+func NextWake(now time.Time, spec ScheduleSpec, r *Randomizer) (time.Time, []Kind) {
+	if r == nil {
+		// 无抖动源：按"准点、只关心哪个小时"处理（零值 Randomizer 跨度即 0）。
+		r = &Randomizer{}
+	} else {
+		r.setSpanFromSpec(spec)
+	}
+
 	type slot struct {
 		at   time.Time
 		kind Kind
 	}
 	var slots []slot
 	if !spec.CheckinDisabled {
-		slots = append(slots, slot{nextFire(now, spec.CheckinHours), KindCheckin})
+		slots = append(slots, slot{r.nextFire(now, spec.CheckinHours), KindCheckin})
 	}
 	if !spec.TravelDisabled {
-		slots = append(slots, slot{nextFire(now, spec.TravelHours), KindTravel})
+		slots = append(slots, slot{r.nextFire(now, spec.TravelHours), KindTravel})
 	}
 	if !spec.ActivityDisabled {
-		slots = append(slots, slot{nextFire(now, spec.ActivityHours), KindActivity})
+		slots = append(slots, slot{r.nextFire(now, spec.ActivityHours), KindActivity})
 	}
 	if !spec.KeepaliveDisabled {
-		slots = append(slots, slot{nextFire(now, spec.KeepaliveHours), KindKeepalive})
+		slots = append(slots, slot{r.nextFire(now, spec.KeepaliveHours), KindKeepalive})
 	}
 	if !spec.SchoolDisabled {
-		slots = append(slots, slot{nextFire(now, spec.SchoolHours), KindSchool})
+		slots = append(slots, slot{r.nextFire(now, spec.SchoolHours), KindSchool})
 	}
 	if !spec.CatDisabled {
-		slots = append(slots, slot{nextFire(now, spec.CatHours), KindCat})
+		slots = append(slots, slot{r.nextFire(now, spec.CatHours), KindCat})
 	}
 	var earliest time.Time
 	for _, sl := range slots {
@@ -134,6 +169,13 @@ func NextWake(now time.Time, spec ScheduleSpec) (time.Time, []Kind) {
 	}
 	if earliest.IsZero() {
 		return time.Time{}, nil
+	}
+	// 每个任务族各自的落点都要记下（不只最早的那个）：面板按任务类型展示
+	// 「下次执行」，读的就是这里——自己重算会掷出另一个随机值。
+	for _, sl := range slots {
+		if !sl.at.IsZero() {
+			r.remember(string(sl.kind), sl.at)
+		}
 	}
 	var kinds []Kind
 	for _, sl := range slots {

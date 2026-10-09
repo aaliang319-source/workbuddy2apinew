@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"time"
 
 	"workbuddy2api/internal/auth"
@@ -33,6 +34,12 @@ var activityAccountDelay = 800 * time.Millisecond
 // 秒发易触发风控，故 1.5s 一条。测试可置 0。
 var activityReportGap = 1500 * time.Millisecond
 
+// checkinAccountDelay 签到账号间限速。此前签到是唯一**没有**账号间距的任务族：
+// 旅行与活跃上报都有限速，签到却是一个 for 循环连着打 /daily-checkin——N 个账号在
+// 几百毫秒内密集签到，是这批账号"同一台机器/同一批脚本"最直接的旁证。
+// 签到是最敏感的操作（涉及账号权益），间距取值比其余任务族更大。测试可置 0。
+var checkinAccountDelay = 1200 * time.Millisecond
+
 // sleepCtx 可取消的等待：ctx 取消立即返回 false（优雅停机不必等 sleep 醒来），
 // 等满返回 true。d<=0 立即放行（测试把延迟置 0 时不白等）。
 // 替换 time.Sleep：账号间/账号内限速值不变，只换等待方式。
@@ -48,6 +55,37 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// pacedSleep 抖动后的限速等待：在 d 的基础上叠加 ±pacedJitterRatio 的随机量。
+//
+// 定长间隔是"机器节奏"本身：每个账号精确间隔 800ms、每条上报精确间隔 1.5s，
+// 连起来是一条整齐的脉冲串，比随机间隔显眼得多。抖动源用 math/rand/v2 全局源
+// （非加密安全，此处只需要打散，不需要不可预测性）。
+//
+// d<=0 时直接放行，保持既有测试"置 0 即不等待"的语义。
+func pacedSleep(ctx context.Context, d time.Duration) bool {
+	if d <= 0 {
+		return ctx.Err() == nil
+	}
+	return sleepCtx(ctx, jitterDuration(d))
+}
+
+// pacedJitterRatio 限速抖动幅度（±20%）。
+const pacedJitterRatio = 0.2
+
+// jitterDuration 把 d 抖动到 [0.8d, 1.2d] 区间；d<=0 原样返回。
+func jitterDuration(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	// rand.Float64() ∈ [0,1) → 偏移量 ∈ [-0.2d, +0.2d)
+	span := float64(d) * pacedJitterRatio
+	out := time.Duration(float64(d) + (2*rand.Float64()-1)*span)
+	if out <= 0 {
+		return d
+	}
+	return out
 }
 
 // cstZone 上游每日重置按自然日 00:00 CST（Asia/Shanghai）。中国无夏令时，固定 +8 即可，
@@ -84,7 +122,7 @@ func (s *Scheduler) runTravel(ctx context.Context) []Outcome {
 			continue // D4 门控：global 无猫猫旅行体系，不发起任何上游调用
 		}
 		if !first {
-			if !sleepCtx(ctx, travelAccountDelay) {
+			if !pacedSleep(ctx, travelAccountDelay) {
 				return out // 优雅停机：不等限速睡满，剩余账号下轮再巡
 			}
 		}

@@ -10,16 +10,19 @@ import (
 	"time"
 )
 
-// TestNextWakeExportedEquivalence 导出纯函数 NextWake 与内部 nextWake 行为一致
+// TestNextWakeExportedEquivalence 导出函数 NextWake 与内部 nextWake 行为一致
 // （排程语义单一来源的发布门槛：automation 模块依赖 NextWake，绝不能与网关
 // 真实循环漂移）。
+//
+// 用 JitterDisabled 关掉抖动来比：抖动是每次现掷的随机数，两次调用本就不该相等
+// （那正是本轮改动的目的）。关掉抖动后两个入口都落到整点，语义差异一目了然。
 func TestNextWakeExportedEquivalence(t *testing.T) {
 	specs := []Config{
-		{}, // 全默认
-		{CheckinHours: []int{9}, TravelHours: []int{9}, ActivityDisabled: true, KeepaliveDisabled: true, SchoolHours: []int{12}, CatHours: []int{1}},
-		{CheckinDisabled: true, TravelDisabled: true, ActivityDisabled: true, KeepaliveDisabled: true, SchoolDisabled: true, CatDisabled: true}, // 全禁用
-		{CheckinHours: []int{0}, TravelHours: []int{23}, ActivityHours: []int{23}},                                                              // 跨日 + 同槽合并
-		{CheckinHours: []int{5}, TravelHours: []int{7}, ActivityHours: []int{9}, KeepaliveHours: []int{11}, SchoolHours: []int{13}, CatHours: []int{15}},
+		{JitterDisabled: true}, // 全默认
+		{JitterDisabled: true, CheckinHours: []int{9}, TravelHours: []int{9}, ActivityDisabled: true, KeepaliveDisabled: true, SchoolHours: []int{12}, CatHours: []int{1}},
+		{JitterDisabled: true, CheckinDisabled: true, TravelDisabled: true, ActivityDisabled: true, KeepaliveDisabled: true, SchoolDisabled: true, CatDisabled: true}, // 全禁用
+		{JitterDisabled: true, CheckinHours: []int{0}, TravelHours: []int{23}, ActivityHours: []int{23}},                                                              // 跨日 + 同槽合并
+		{JitterDisabled: true, CheckinHours: []int{5}, TravelHours: []int{7}, ActivityHours: []int{9}, KeepaliveHours: []int{11}, SchoolHours: []int{13}, CatHours: []int{15}},
 	}
 	times := []time.Time{
 		time.Date(2026, 9, 18, 8, 30, 0, 0, time.Local),
@@ -31,7 +34,7 @@ func TestNextWakeExportedEquivalence(t *testing.T) {
 		for j, now := range times {
 			wantAt, wantKinds := s.nextWake(now)
 			// 口径：运行时 spec 一定经过 New 归一（main.go 用 sch.Spec()），故用 s.Spec() 对比。
-			gotAt, gotKinds := NextWake(now, s.Spec())
+			gotAt, gotKinds := NextWake(now, s.Spec(), s.rnd)
 			if !wantAt.Equal(gotAt) {
 				t.Errorf("case %d/%d: at=%v want %v", i, j, gotAt, wantAt)
 				continue

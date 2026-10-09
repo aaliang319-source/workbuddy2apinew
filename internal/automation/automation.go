@@ -35,6 +35,10 @@ type Config struct {
 	// LoopEnabled false 时 Run 只等待退出（不驱动定时），手动触发/历史/状态仍可用。
 	LoopEnabled bool
 	Now         func() time.Time // 测试注入时钟；nil = time.Now
+	// Rand 抖动源；nil 时自建。生产路径由 cmd/server 传入 scheduler 的实例——
+	// 循环必须与执行侧共用同一个实例：掷随机数的是循环，面板读的是循环记下的落点，
+	// 两个实例各掷各的，显示就会与真实执行不符（见 scheduler/random.go）。
+	Rand *scheduler.Randomizer
 }
 
 // Manager 自动化管理器。
@@ -46,6 +50,7 @@ type Manager struct {
 	spec    scheduler.ScheduleSpec
 	running map[scheduler.Kind]string // kind → 当前 run ID（单飞）
 	wake    chan struct{}
+	rnd     *scheduler.Randomizer
 }
 
 // New 构建管理器（加载历史 + 启动后台落盘）。
@@ -53,13 +58,19 @@ func New(cfg Config) *Manager {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	if cfg.Rand == nil {
+		cfg.Rand = scheduler.NewRandomizer(cfg.Spec.JitterSpan()) // 跨度已由 JitterSpan() 归一
+	}
 	m := &Manager{
 		cfg:     cfg,
 		store:   newStore(cfg.HistoryFile, cfg.HistoryRuns),
 		spec:    cfg.Spec,
 		running: map[scheduler.Kind]string{},
 		wake:    make(chan struct{}, 1),
+		rnd:     cfg.Rand,
 	}
+	// 启动装配：把注入实例的跨度对齐到本管理器的初始排程（保留落点——此刻还没有）。
+	m.rnd.SyncSpan(cfg.Spec)
 	return m
 }
 
@@ -89,7 +100,10 @@ func (m *Manager) Reconfigure(spec scheduler.ScheduleSpec) error {
 	m.mu.Lock()
 	m.spec = spec
 	m.mu.Unlock()
-	// 非阻塞唤醒：循环在 select 里收到后重算 nextWake。
+	// 作废全部已排定的落点：用户可能改了小时、也可能改了跨度，旧值一律不再代表
+	// "下次执行"。循环被唤醒后立刻重掷补上，面板短暂显示「待排定」。
+	m.rnd.ResetForSpec(spec)
+	// 非阻塞唤醒：循环在 select 里收到后重算 nextWake（真正掷新的随机落点）。
 	select {
 	case m.wake <- struct{}{}:
 	default:
@@ -124,6 +138,15 @@ func validateSpec(spec scheduler.ScheduleSpec) error {
 	return nil
 }
 
+// schedule 排定下一次触发：读当前排程 → 现掷随机落点 → 记入 m.rnd 供面板显示。
+//
+// **这是生产路径上唯一会掷随机数的地方。** 面板显示「下次执行」时读的是这里掷出的
+// 结果（Randomizer.Scheduled），绝不能自己再调一次 NextWake——那会掷出另一个随机值，
+// 显示的时刻与真实执行不符。
+func (m *Manager) schedule(now time.Time) (time.Time, []scheduler.Kind) {
+	return scheduler.NextWake(now, m.Spec(), m.rnd)
+}
+
 // Run 定时循环：算下次触发 → 定时/被热更新唤醒 → 到点并行执行同槽任务。
 // 阻塞直到 ctx 取消（与 scheduler.Run 的行为对齐）。
 func (m *Manager) Run(ctx context.Context) {
@@ -133,7 +156,8 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 	for {
 		now := m.now()
-		next, kinds := scheduler.NextWake(now, m.Spec())
+		// 每次排定现掷随机落点（并记入 m.rnd，供面板显示）。
+		next, kinds := m.schedule(now)
 		if next.IsZero() {
 			// 六类全部禁用：不空转，只等退出或热更新唤醒。
 			select {
@@ -280,7 +304,8 @@ func (m *Manager) Status() Status {
 		hours, enabled := hoursOf(spec, k)
 		ks := KindStatus{
 			Kind: string(k), Enabled: enabled, Hours: hours,
-			NextFire: nextFireForKind(now, spec, k),
+			NextFire:      m.nextFireForKind(k),
+			JitterMinutes: spec.JitterSpan(), // 0 = 准点（jitter_disabled）
 		}
 		if id, ok := running[k]; ok {
 			ks.Running = true
@@ -320,28 +345,36 @@ func hoursOf(spec scheduler.ScheduleSpec, k scheduler.Kind) ([]int, bool) {
 	return nil, false
 }
 
-// nextFireForKind 单个任务类型的下次触发时刻：把 spec 收窄到只启用该类，
-// 复用 NextWake 的排程语义（单一来源，避免两处实现漂移）。
-func nextFireForKind(now time.Time, spec scheduler.ScheduleSpec, k scheduler.Kind) *time.Time {
-	single := scheduler.ScheduleSpec{
-		CheckinDisabled: true, TravelDisabled: true, ActivityDisabled: true,
-		KeepaliveDisabled: true, SchoolDisabled: true, CatDisabled: true,
+// nextFireForKind 单个任务类型的"下次执行"时刻——**读定时循环排定时记下的落点**。
+//
+// 为什么不再自己调 NextWake 重算：抖动是每次排定现掷的随机数，重算就是另掷一次，
+// 面板显示的时刻会与真实执行不符。回退仅限"还没排定过"（启动瞬间/该任务刚被启用/
+// 刚热更新过），此时给出 nil，面板显示「待排定」——**绝不编造一个时刻**。
+//
+// 对**已禁用**的任务一律返回 nil：循环不再为它排定，但落点记忆里还留着禁用前那一次
+// 的值（不会过期，也不该被展示成一个"下次执行"）。只让启用中的任务暴露落点。
+func (m *Manager) nextFireForKind(k scheduler.Kind) *time.Time {
+	if _, enabled := hoursOf(m.Spec(), k); !enabled {
+		return nil
 	}
-	switch k {
-	case scheduler.KindCheckin:
-		single.CheckinDisabled, single.CheckinHours = spec.CheckinDisabled, spec.CheckinHours
-	case scheduler.KindTravel:
-		single.TravelDisabled, single.TravelHours = spec.TravelDisabled, spec.TravelHours
-	case scheduler.KindActivity:
-		single.ActivityDisabled, single.ActivityHours = spec.ActivityDisabled, spec.ActivityHours
-	case scheduler.KindKeepalive:
-		single.KeepaliveDisabled, single.KeepaliveHours = spec.KeepaliveDisabled, spec.KeepaliveHours
-	case scheduler.KindSchool:
-		single.SchoolDisabled, single.SchoolHours = spec.SchoolDisabled, spec.SchoolHours
-	case scheduler.KindCat:
-		single.CatDisabled, single.CatHours = spec.CatDisabled, spec.CatHours
+	if at, ok := m.rnd.Scheduled(string(k)); ok {
+		return &at
 	}
-	at, kinds := scheduler.NextWake(now, single)
+	return nil
+}
+
+// nextFireForHours 按"只关心哪个小时"算下次触发——关闭抖动的排程计算，**仅供测试**
+// 断言排程语义（小时是否被正确解析、跨天）使用。
+//
+// 生产路径的「下次执行」一律读循环记下的落点（见 nextFireForKind）：抖动每次现掷，
+// 这里重算出来的是另一个随机值，拿去显示就是错的。关掉抖动后它是确定性的，
+// 因此适合当"用户配的小时有没有被正确解析"的断言口径。
+func nextFireForHours(now time.Time, hours []int, disabled bool) *time.Time {
+	if disabled || len(hours) == 0 {
+		return nil
+	}
+	single := scheduler.ScheduleSpec{JitterDisabled: true, CheckinHours: hours}
+	at, kinds := scheduler.NextWake(now, single, nil)
 	if len(kinds) == 0 || at.IsZero() {
 		return nil
 	}

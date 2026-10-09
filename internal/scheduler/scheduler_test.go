@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,48 +19,129 @@ import (
 	"workbuddy2api/internal/upstream"
 )
 
+// assertJittered 断言 t 落在 hour 点窗口内、且**不在整点**——这正是本次改动的全部目的：
+// 落点仍归属配置的小时（可预期），但分秒每次现掷（不可指纹化）。
+// wantDay 传入期望的自然日（跨天场景由调用方算好）。
+func assertJittered(t *testing.T, label string, at, wantDay time.Time, hour int) {
+	t.Helper()
+	if at.Day() != wantDay.Day() || at.Month() != wantDay.Month() {
+		t.Errorf("%s: next=%v want day %v", label, at, wantDay.Format("2006-01-02"))
+		return
+	}
+	if at.Hour() != hour {
+		t.Errorf("%s: next=%v want hour %d（抖动不跨小时）", label, at, hour)
+		return
+	}
+	// 核心不变量：整点 :00 是所有自动化脚本的共同指纹，必须避开。
+	if at.Minute() == 0 && at.Second() == 0 {
+		t.Errorf("%s: next=%v 落在整点——本次改动的唯一硬性要求就是不整点", label, at)
+	}
+	// 落点不得越过本小时最后一秒（夹取兜底不得反过来把任务排到下一小时）。
+	if at.Minute() > 55 {
+		t.Errorf("%s: next=%v 抖动越过了 %d 点窗口上界", label, at, hour)
+	}
+}
+
+// testRnd 测试用抖动源（默认跨度）。nextFire 现已是 Randomizer 的方法，一次性实例即可。
+//
+// 注意传的是 Default 而不是 0：NewRandomizer 的 0 表示**准点**（跨度 0），
+// "未配置 → 默认跨度"的兜底在 ScheduleSpec.JitterSpan() 那一侧。
+func testRnd() *Randomizer { return NewRandomizer(jitterSpanDefault) }
+
 func TestNextFire(t *testing.T) {
 	loc := time.Local
 	now := time.Date(2026, 7, 27, 10, 0, 0, 0, loc)
-	next := nextFire(now, []int{9, 21})
-	if next.Hour() != 21 || next.Day() != 27 {
-		t.Errorf("next=%v want 21:00 same day", next)
-	}
+	next := testRnd().nextFire(now, []int{9, 21})
+	assertJittered(t, "10:00 起算，同日晚些的 21 点", next, now, 21)
 	now = time.Date(2026, 7, 27, 22, 0, 0, 0, loc)
-	next = nextFire(now, []int{9, 21})
-	if next.Hour() != 9 || next.Day() != 28 {
-		t.Errorf("next=%v want 09:00 next day", next)
-	}
+	next = testRnd().nextFire(now, []int{9, 21})
+	assertJittered(t, "22:00 起算，次日 9 点", next, now.AddDate(0, 0, 1), 9)
+	// 09:00 起算：9 点的抖动落点（恒 >09:00）仍在将来，故**当日**触发。
+	// 这是与改动前最大的语义差别——旧实现 9 点整已被算作"已过"，要等到次日。
 	now = time.Date(2026, 7, 27, 9, 0, 0, 0, loc)
-	next = nextFire(now, []int{9})
-	if next.Day() != 28 {
-		t.Errorf("exact match should roll to next day: %v", next)
+	next = testRnd().nextFire(now, []int{9})
+	assertJittered(t, "09:00 起算，9 点窗口尚在当日", next, now, 9)
+
+	// 09:59 起算（已过抖动上界 09:55）：当日 9 点窗口确实过了，滚到次日。
+	now = time.Date(2026, 7, 27, 9, 59, 0, 0, loc)
+	next = testRnd().nextFire(now, []int{9})
+	assertJittered(t, "09:59 起算滚到次日 9 点", next, now.AddDate(0, 0, 1), 9)
+}
+
+// TestNextFireJitterNeverOnTheHour 抖动落点永远避开整点（本次改动的硬性要求）。
+func TestNextFireJitterNeverOnTheHour(t *testing.T) {
+	loc := time.Local
+	r := testRnd()
+	for day := 1; day <= 28; day++ {
+		for _, h := range []int{0, 1, 9, 12, 21, 22, 23} {
+			// 从该小时的前一小时起算，保证落在本小时内。
+			now := time.Date(2026, 9, day, (h+23)%24, 0, 0, 0, loc)
+			at := r.nextFire(now, []int{h})
+			if at.Hour() != h {
+				t.Fatalf("day=%d h=%d: next=%v 不在目标小时", day, h, at)
+			}
+			if at.Minute() == 0 && at.Second() == 0 {
+				t.Fatalf("day=%d h=%d: next=%v 落在整点", day, h, at)
+			}
+		}
+	}
+}
+
+// TestNextFireRandomEveryTime 每次排定重新掷随机数——这是本轮改动的核心诉求
+// （用户原话：「每次都是随机时间执行，不是你固定时间」）。
+//
+// 反过来说：同一起算时刻连掷多次必须**不恒定**。旧实现按 (kind, 日, 小时) 哈希，
+// 每天同一时刻执行，只是把指纹从 :00 挪到了 :33，仍然是一条可被关联的规律。
+func TestNextFireRandomEveryTime(t *testing.T) {
+	loc := time.Local
+	now := time.Date(2026, 9, 18, 8, 0, 0, 0, loc)
+	r := testRnd()
+	seen := map[time.Time]int{}
+	for i := 0; i < 60; i++ {
+		seen[r.nextFire(now, []int{9})]++
+	}
+	if len(seen) < 2 {
+		t.Fatalf("60 次排定只掷出 %d 个不同落点——抖动仍是固定的", len(seen))
+	}
+}
+
+// TestNextFireKindsDifferAtSameHour 同一小时上不同任务族错开：签到与旅行都配 9 点，
+// 抖动必须各自独立掷，否则同刻并发仍然是最易识别的脚本形态。
+func TestNextFireKindsDifferAtSameHour(t *testing.T) {
+	loc := time.Local
+	now := time.Date(2026, 9, 18, 8, 0, 0, 0, loc)
+	r := testRnd()
+	checkin := r.nextFire(now, []int{9})
+	travel := r.nextFire(now, []int{9})
+	if checkin.Equal(travel) {
+		t.Errorf("checkin=%v travel=%v 同刻——不同任务族应各自错开", checkin, travel)
 	}
 }
 
 func TestNextFireMergesSchedules(t *testing.T) {
 	now := time.Date(2026, 7, 27, 20, 0, 0, 0, time.Local)
-	next := nextFire(now, []int{9, 21, 22})
-	if next.Hour() != 21 {
-		t.Errorf("next=%v want 21 (earliest of 21/22)", next)
-	}
+	next := testRnd().nextFire(now, []int{9, 21, 22})
+	assertJittered(t, "20:00 起算，最近的 21 点", next, now, 21)
 }
 
-// TestNextWakeKeepaliveOnly 签到已过点时按保活整点唤醒。
+// TestNextWakeKeepaliveOnly 签到已过点时按保活时点唤醒。
 func TestNextWakeKeepaliveOnly(t *testing.T) {
 	s := New(Config{CheckinHours: []int{9}, KeepaliveHours: []int{22},
 		TravelDisabled: true, ActivityDisabled: true})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v", at, want)
-	}
+	now := time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local)
+	at, kinds := s.nextWake(now)
+	assertJittered(t, "20:00 起算，保活 22 点", at, now, 22)
 	if len(kinds) != 1 || kinds[0] != taskKeepalive {
 		t.Errorf("kinds=%v want [keepalive]", kinds)
 	}
 }
 
-// TestNextWakeSameInstantFiresAll 签到与保活配到同一整点时两类任务都要执行。
+// TestNextWakeSameInstantFiresAll 同刻多任务合并语义仍需保留：抖动让相撞变得罕见，
+// 但语义上"两个任务落到同一时刻就一起执行"必须成立。此处把抖动固定为同一值来构造相撞。
 func TestNextWakeSameInstantFiresAll(t *testing.T) {
+	// 抖动固定 10 分钟：签到 22 点与保活 22 点必然同刻。
+	defer swapRoll(t, 10*time.Minute)()
+
 	s := New(Config{
 		CheckinHours:     []int{9, 22},
 		TravelHours:      []int{}, // 禁用旅行时点干扰（仅测签到+保活同整点）
@@ -71,21 +153,122 @@ func TestNextWakeSameInstantFiresAll(t *testing.T) {
 		CatDisabled:      true,
 	})
 	at, kinds := s.nextWake(time.Date(2026, 9, 11, 21, 30, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
+	if want := time.Date(2026, 9, 11, 22, 10, 0, 0, time.Local); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
 	}
 	if !hasKind(kinds, taskCheckin) || !hasKind(kinds, taskKeepalive) {
 		t.Errorf("kinds=%v want checkin+keepalive（同一时刻两任务）", kinds)
 	}
 
-	// 22 点过后下一次是次日 09:00，且只含签到（旅行/活跃已禁用）。
+	// 22 点过后下一次是次日 09:10，且只含签到（旅行/活跃已禁用）。
 	at, kinds = s.nextWake(time.Date(2026, 9, 11, 22, 30, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 12, 9, 0, 0, 0, time.Local); !at.Equal(want) {
+	if want := time.Date(2026, 9, 12, 9, 10, 0, 0, time.Local); !at.Equal(want) {
 		t.Errorf("next=%v want %v", at, want)
 	}
 	if len(kinds) != 1 || kinds[0] != taskCheckin {
 		t.Errorf("kinds=%v want [checkin]", kinds)
 	}
+}
+
+// swapRoll 把抖动偏移固定为 d 秒/分钟（固定值 + 跨度 0 让 rollLocked 的 secs<=0
+// 分支返回 0，这里直接替换 rollFn 绕开跨度），返回还原函数。
+// 配合 `defer swapRoll(t, d)()` 使用——只用于构造"两个任务恰好同刻"的确定性场景。
+func swapRoll(t *testing.T, d time.Duration) func() {
+	t.Helper()
+	orig := rollFn
+	rollFn = func(*rand.Rand, time.Duration) time.Duration { return d }
+	return func() { rollFn = orig }
+}
+
+// TestNextWakeQuasiZeroRandomizerIsPunctual 零值（含 span 0）的 Randomizer 必须在
+// NextWake 里**保持准点**，即 r==nil 与 &Randomizer{} 同口径——"零值可用"是
+// NextWake 显式承诺的契约（nil 时它就地构造 &Randomizer{}）。
+//
+// 这条守的是一个已经踩过的坑：NewRandomizer 曾经把"span<=0"也当成"未配置 → 默认 55"，
+// 于是 jitter_disabled 构造出来的实例跨度是 55，准点配置静默失效（要等第一次排定
+// 经 setSpanFromSpec 才被纠正）。现在默认值只在 ScheduleSpec.JitterSpan() 一处解析。
+func TestNextWakeQuasiZeroRandomizerIsPunctual(t *testing.T) {
+	now := time.Date(2026, 9, 25, 8, 0, 0, 0, time.Local)
+	spec := ScheduleSpec{JitterDisabled: true, CheckinHours: []int{9}, TravelDisabled: true,
+		ActivityDisabled: true, KeepaliveDisabled: true, SchoolDisabled: true, CatDisabled: true}
+	for i, r := range []*Randomizer{nil, {}, NewRandomizer(0)} {
+		at, kinds := NextWake(now, spec, r)
+		if len(kinds) != 1 || !at.Equal(time.Date(2026, 9, 25, 9, 0, 0, 0, time.Local)) {
+			t.Errorf("case %d: at=%v kinds=%v want 09:00:00 准点", i, at, kinds)
+		}
+	}
+}
+
+// TestNewSchedulerJitterDisabledPunctual 构造期就尊重 jitter_disabled：
+// New 出来的调度器跨度必须是 0，不必等第一次排定。
+func TestNewSchedulerJitterDisabledPunctual(t *testing.T) {
+	if got := New(Config{JitterDisabled: true}).Randomizer().SpanMinutes(); got != 0 {
+		t.Errorf("SpanMinutes()=%d want 0（jitter_disabled 必须准点）", got)
+	}
+	// 未配置（零值）→ 默认 55。
+	if got := New(Config{}).Randomizer().SpanMinutes(); got != jitterSpanDefault {
+		t.Errorf("SpanMinutes()=%d want %d（未配置回落默认）", got, jitterSpanDefault)
+	}
+	// 超上限 → 夹到上限。
+	if got := New(Config{JitterSpanMinutes: 600}).Randomizer().SpanMinutes(); got != jitterSpanMax {
+		t.Errorf("SpanMinutes()=%d want %d（超上限夹取）", got, jitterSpanMax)
+	}
+}
+
+// TestNextWakeRememberKeepsAllKinds 面板按任务类型读落点，因此每个**启用**的任务族
+// 都必须被记下——只记最早的那一个，面板上其余任务就永远显示「待排定」。
+func TestNextWakeRememberKeepsAllKinds(t *testing.T) {
+	now := time.Date(2026, 9, 25, 8, 0, 0, 0, time.Local)
+	spec := ScheduleSpec{
+		CheckinHours: []int{9}, TravelHours: []int{9}, ActivityHours: []int{10},
+		KeepaliveHours: []int{22}, SchoolHours: []int{12}, CatHours: []int{1},
+	}
+	r := NewRandomizer(jitterSpanDefault)
+	if _, kinds := NextWake(now, spec, r); len(kinds) == 0 {
+		t.Fatal("六族全启用却排不出任务")
+	}
+	for _, k := range AllKinds {
+		at, ok := r.Scheduled(string(k))
+		if !ok {
+			t.Errorf("%s 未被记下落点（面板会一直显示「待排定」）", k)
+			continue
+		}
+		hours, _ := hoursOfSpec(spec, k)
+		if !containsInt(hours, at.Hour()) {
+			t.Errorf("%s 落点 %v 不在所配小时 %v 内", k, at, hours)
+		}
+		if at.Minute() == 0 && at.Second() == 0 {
+			t.Errorf("%s 落点 %v 落在整点", k, at)
+		}
+	}
+}
+
+// hoursOfSpec 测试用的 spec 小时查表（生产侧对应 automation.hoursOf）。
+func hoursOfSpec(spec ScheduleSpec, k Kind) ([]int, bool) {
+	switch k {
+	case KindCheckin:
+		return spec.CheckinHours, !spec.CheckinDisabled
+	case KindTravel:
+		return spec.TravelHours, !spec.TravelDisabled
+	case KindActivity:
+		return spec.ActivityHours, !spec.ActivityDisabled
+	case KindKeepalive:
+		return spec.KeepaliveHours, !spec.KeepaliveDisabled
+	case KindSchool:
+		return spec.SchoolHours, !spec.SchoolDisabled
+	case KindCat:
+		return spec.CatHours, !spec.CatDisabled
+	}
+	return nil, false
+}
+
+func containsInt(xs []int, v int) bool {
+	for _, x := range xs {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // TestNextWakeNothingScheduled 两类任务全空时返回零值，Run 只等退出信号。
@@ -101,10 +284,9 @@ func TestNextWakeNothingScheduled(t *testing.T) {
 func TestNextWakeCheckinDisabled(t *testing.T) {
 	s := New(Config{CheckinDisabled: true, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22},
 		TravelDisabled: true, ActivityDisabled: true})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 22, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（不应再有 21 点签到）", at, want)
-	}
+	now := time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local)
+	at, kinds := s.nextWake(now)
+	assertJittered(t, "签到禁用 → 只剩保活 22 点", at, now, 22)
 	if len(kinds) != 1 || kinds[0] != taskKeepalive {
 		t.Errorf("kinds=%v want [keepalive]", kinds)
 	}
@@ -114,10 +296,9 @@ func TestNextWakeCheckinDisabled(t *testing.T) {
 func TestNextWakeKeepaliveDisabled(t *testing.T) {
 	s := New(Config{KeepaliveDisabled: true, CheckinHours: []int{9, 21}, KeepaliveHours: []int{22},
 		TravelDisabled: true, ActivityDisabled: true})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（不应再有 22 点保活）", at, want)
-	}
+	now := time.Date(2026, 9, 11, 20, 0, 0, 0, time.Local)
+	at, kinds := s.nextWake(now)
+	assertJittered(t, "保活禁用 → 只剩签到 21 点", at, now, 21)
 	if len(kinds) != 1 || kinds[0] != taskCheckin {
 		t.Errorf("kinds=%v want [checkin]", kinds)
 	}

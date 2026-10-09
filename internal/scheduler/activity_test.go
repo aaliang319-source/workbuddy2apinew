@@ -491,10 +491,9 @@ func TestNextWakeTravelIndependent(t *testing.T) {
 		ActivityHours:  []int{10},
 		KeepaliveHours: []int{22},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（旅行 09:00 独立时点）", at, want)
-	}
+	now := time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local)
+	at, kinds := s.nextWake(now)
+	assertJittered(t, "旅行 09 点独立时点", at, now, 9)
 	if len(kinds) != 1 || kinds[0] != taskTravel {
 		t.Errorf("kinds=%v want [travel]", kinds)
 	}
@@ -508,10 +507,11 @@ func TestNextWakeActivityIndependent(t *testing.T) {
 		ActivityHours:  []int{10},
 		KeepaliveHours: []int{22},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 9, 30, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 10, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（活跃 10:00 独立时点）", at, want)
-	}
+	// 09:20 起算：旅行 9 点的抖动落点（最晚 09:57）可能仍在将来，会把活跃挤到后面；
+	// 这里取 09:59（9 点窗口已彻底过去）以确保下一个就是活跃的 10 点。
+	now := time.Date(2026, 9, 11, 9, 59, 0, 0, time.Local)
+	at, kinds := s.nextWake(now)
+	assertJittered(t, "活跃 10 点独立时点", at, now, 10)
 	if len(kinds) != 1 || kinds[0] != taskActivity {
 		t.Errorf("kinds=%v want [activity]", kinds)
 	}
@@ -525,11 +525,10 @@ func TestNextWakeTravelDisabled(t *testing.T) {
 		TravelDisabled: true,
 		KeepaliveHours: []int{22},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
-	// 旅行禁用 → 09:00 旅行时点不应出现，最近的是 09:00 签到（同小时但签到未禁用）。
-	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v", at, want)
-	}
+	now := time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local)
+	at, kinds := s.nextWake(now)
+	// 旅行禁用 → 09 点旅行时点不应出现，最近的是 09 点签到（同小时但签到未禁用）。
+	assertJittered(t, "旅行禁用 → 09 点只剩签到", at, now, 9)
 	if !hasKind(kinds, taskCheckin) {
 		t.Errorf("kinds=%v want 含 checkin", kinds)
 	}
@@ -548,10 +547,10 @@ func TestNextWakeActivityDisabled(t *testing.T) {
 		SchoolDisabled:   true,
 		CatDisabled:      true,
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 9, 30, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 21, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（活跃禁用 → 跳过 10:00）", at, want)
-	}
+	// 09:59 起算：跳过已过去的 9 点旅行与（已禁用的）10 点活跃，最近的是当日 21 点签到。
+	now := time.Date(2026, 9, 11, 9, 59, 0, 0, time.Local)
+	at, kinds := s.nextWake(now)
+	assertJittered(t, "活跃禁用 → 跳到 21 点签到", at, now, 21)
 	if hasKind(kinds, taskActivity) {
 		t.Errorf("kinds=%v 不应含 activity（已禁用）", kinds)
 	}
@@ -566,10 +565,9 @@ func TestCheckinDisabledTravelStillRuns(t *testing.T) {
 		ActivityHours:   []int{10},
 		KeepaliveHours:  []int{22},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v（签到禁用，旅行 09:00 照跑）", at, want)
-	}
+	now := time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local)
+	at, kinds := s.nextWake(now)
+	assertJittered(t, "签到禁用，旅行 09 点照跑", at, now, 9)
 	if hasKind(kinds, taskCheckin) {
 		t.Errorf("kinds=%v 不应含 checkin（已禁用）", kinds)
 	}
@@ -598,7 +596,8 @@ func TestAllFourDisabledNoSpin(t *testing.T) {
 	}
 }
 
-// TestNextWakeSameHourTravelAndCheckin 旅行与签到配到同一小时时两类任务都要执行。
+// TestNextWakeSameHourTravelAndCheckin 旅行与签到配到同一小时：两者都在 9 点窗口内，
+// 但抖动使它们**各自错开**（不再同刻并发打上游）——取最近的那个作为唤醒时刻。
 func TestNextWakeSameHourTravelAndCheckin(t *testing.T) {
 	s := New(Config{
 		CheckinHours:   []int{9, 21},
@@ -606,12 +605,33 @@ func TestNextWakeSameHourTravelAndCheckin(t *testing.T) {
 		ActivityHours:  []int{10},
 		KeepaliveHours: []int{22},
 	})
-	at, kinds := s.nextWake(time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local))
-	if want := time.Date(2026, 9, 11, 9, 0, 0, 0, time.Local); !at.Equal(want) {
-		t.Errorf("next=%v want %v", at, want)
+	now := time.Date(2026, 9, 11, 8, 0, 0, 0, time.Local)
+	at, kinds := s.nextWake(now)
+	assertJittered(t, "9 点窗口内两任务", at, now, 9)
+	// 唤醒时刻只带最近的那一类（两类的落点独立现掷，通常不同刻）。
+	if len(kinds) == 0 {
+		t.Fatalf("kinds=%v want 至少 1 类", kinds)
 	}
-	if !hasKind(kinds, taskCheckin) || !hasKind(kinds, taskTravel) {
-		t.Errorf("kinds=%v want 含 checkin+travel（同 09:00 两任务）", kinds)
+	if !hasKind(kinds, taskCheckin) && !hasKind(kinds, taskTravel) {
+		t.Errorf("kinds=%v want checkin 或 travel", kinds)
+	}
+
+	// 两类各自的时点都落在 9 点窗口内，且**碰巧同刻的概率极低**（1/3300 量级）。
+	// 单次比对会引入偶发失败，故连掷 20 轮断言"并非每次都相同"——同刻本就是
+	// 抖动要避免的形态，偶发相撞不是回归。
+	var cAt, tAt time.Time
+	same := 0
+	for i := 0; i < 20; i++ {
+		cAt = testRnd().nextFire(now, []int{9})
+		tAt = testRnd().nextFire(now, []int{9})
+		if cAt.Equal(tAt) {
+			same++
+		}
+	}
+	assertJittered(t, "签到 9 点", cAt, now, 9)
+	assertJittered(t, "旅行 9 点", tAt, now, 9)
+	if same == 20 {
+		t.Errorf("checkin/travel 20 轮全部同刻——同小时两任务应各自错开")
 	}
 }
 

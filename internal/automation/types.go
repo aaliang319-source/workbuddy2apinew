@@ -58,13 +58,19 @@ func (r Run) summary() Run {
 
 // KindStatus 单个任务类型的实时状态。
 type KindStatus struct {
-	Kind         string     `json:"kind"`
-	Enabled      bool       `json:"enabled"`
-	Hours        []int      `json:"hours"`
-	NextFire     *time.Time `json:"next_fire,omitempty"`
-	Running      bool       `json:"running"`
-	CurrentRunID string     `json:"current_run_id,omitempty"`
-	LastRun      *Run       `json:"last_run,omitempty"`
+	Kind    string `json:"kind"`
+	Enabled bool   `json:"enabled"`
+	Hours   []int  `json:"hours"`
+	// NextFire 定时循环**最近一次排定时掷出的**触发时刻；nil = 循环还没排定过
+	// （启动瞬间 / 该任务刚被启用 / 刚热更新过），面板应显示「待排定」而不是编造
+	// 一个时刻，也不能自己重算——重算就是另掷一次随机数，显示的与真实执行不符。
+	NextFire *time.Time `json:"next_fire,omitempty"`
+	// JitterMinutes 当前抖动跨度（分钟，0 = 准点执行），面板据此说明"会在这个窗口内
+	// 随机取一刻执行"。同一任务每一天的落点都不同。
+	JitterMinutes int    `json:"jitter_minutes"`
+	Running       bool   `json:"running"`
+	CurrentRunID  string `json:"current_run_id,omitempty"`
+	LastRun       *Run   `json:"last_run,omitempty"`
 }
 
 // Status 自动化总览（GET /admin/automation/status）。

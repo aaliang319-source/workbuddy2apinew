@@ -13,6 +13,7 @@ import (
 	"workbuddy2api/internal/auth"
 	"workbuddy2api/internal/logfmt"
 	"workbuddy2api/internal/pool"
+	"workbuddy2api/internal/session"
 	"workbuddy2api/internal/upstream"
 )
 
@@ -32,6 +33,12 @@ type Config struct {
 	// ActivityReportCount 每号每次活跃上报的条数：领猫前置需 5 次对话，
 	// 默认 5 条同一 conversationId 内多轮上报把 chat_5 刷满；0/缺省=1 兼容旧行为。
 	ActivityReportCount int
+
+	// JitterSpanMinutes 每个小时窗口内的随机抖动跨度（分钟）；<=0 走默认 55，上限 55。
+	// 触发时刻 = 所配小时 + [1s, 跨度] 内随机偏移，**整点永不被选中**。
+	// JitterDisabled 明确要求准点执行（跨度归 0）。
+	JitterSpanMinutes int
+	JitterDisabled    bool
 
 	// ScriptTimeout 脚本类任务（school/cat）子进程超时，<=0 回落 10m。
 	ScriptTimeout time.Duration
@@ -67,7 +74,15 @@ type Scheduler struct {
 
 	// checkinMu 串行化签到：定时入口与手动触发互斥，避免同一时刻重复打上游签到接口。
 	checkinMu sync.Mutex
+
+	// rnd 抖动源与落点记忆：Run 循环排定时现掷随机数并记下，面板读记忆值显示
+	// 「下次执行」（不能自己重算，否则显示与真实执行不符）。见 random.go。
+	rnd *Randomizer
 }
+
+// Randomizer 返回本调度器的抖动源与落点记忆（automation 用它给面板提供
+// 「下次执行」，而不是自己重算一遍）。
+func (s *Scheduler) Randomizer() *Randomizer { return s.rnd }
 
 // New 构建。
 func New(cfg Config) *Scheduler {
@@ -96,7 +111,13 @@ func New(cfg Config) *Scheduler {
 	if cfg.ScriptTimeout <= 0 {
 		cfg.ScriptTimeout = scriptTimeoutDefault
 	}
-	return &Scheduler{cfg: cfg, adoptTried: make(map[string]string)}
+	// 跨度由 Spec().JitterSpan() 归一（未配置 → 默认 55，JitterDisabled → 0），
+	// 避免同一份默认值在多处重复解析。
+	return &Scheduler{
+		cfg:        cfg,
+		adoptTried: make(map[string]string),
+		rnd:        NewRandomizer(cfg.Spec().JitterSpan()),
+	}
 }
 
 // checkinRefreshSkew 签到前判定"token 是否临近过期"的时间窗口（10 分钟）。
@@ -125,13 +146,45 @@ type CheckinOutcome struct {
 // ErrBusy 已有一次签到正在执行（手动入口与定时撞车）。
 var ErrBusy = errors.New("checkin already running")
 
-// nextFire 返回 now 之后最近的一个整点触发时间；hours 为本地小时（0-23）。
-func nextFire(now time.Time, hours []int) time.Time {
+// newOpaqueID 生成 32 位 hex 的不透明标识（conversationId 等）。
+// 与 internal/session.NewMessageID 同口径：crypto/rand，失败回落 math/rand/v2。
+func newOpaqueID() string { return session.NewMessageID() }
+
+// 夜猫任务的时段约束（CST）：script 侧 scripts/task_runner.py 的 within_night_window()
+// 硬编码 [23:00, 次日 08:00)，出窗即打印 "非夜猫窗口(23-08 CST)，skip pending" 白跑一趟。
+//
+// 这里**不需要**为夜猫单独收窄抖动：偏移恒落在 (0, 55] 分钟内且不跨小时，故 h 点
+// 触发落在 [h:00:01, h:55:00]，窗口内的整点（23 与 0..7）抖动后仍在窗内
+// （23:00:01..23:55 与 7:00:01..7:55 均未越界）；而窗外的整点本来就已经出窗。
+// 换来的约束是：**一旦放宽抖动跨度到 >=60 分钟，或把窗口边界改成非整点，
+// 必须回头复核夜猫窗口**（TestNextFireCatStaysInNightWindow 守着这条不变量）。
+const (
+	catWindowStartHour = 23
+	catWindowEndHour   = 8
+)
+
+// nextFire 返回 now 之后最近的一次触发时刻；hours 为本地小时（0-23）。
+//
+// hours 是**窗口**而非精确时刻：每个小时点内随机取一刻（见 Randomizer.jitteredAt），
+// 整点本身永不被选中。每个小时点各掷一次——窗口当天可能已过，改掷次日；
+// 掷出的落点若已过（同一小时内重算时可能发生）就再掷一次，最多 3 次后兜底用窗口起点，
+// 保证返回值恒为有效时刻（调用方不能拿到零时间）。
+func (r *Randomizer) nextFire(now time.Time, hours []int) time.Time {
 	var earliest time.Time
 	for _, h := range hours {
-		t := time.Date(now.Year(), now.Month(), now.Day(), h, 0, 0, 0, now.Location())
+		// 先连掷 3 次找一个"今天仍在将来"的落点。
+		t := time.Time{}
+		for i := 0; i < 3; i++ {
+			cand := r.jitteredAt(now, h)
+			if cand.After(now) {
+				t = cand
+				break
+			}
+			t = cand // 兜底：保留最后一个候选
+		}
 		if !t.After(now) {
-			t = t.Add(24 * time.Hour)
+			// 今天这个小时确实过了 → 改掷次日同一小时（次日必在将来）。
+			t = r.jitteredAt(now.AddDate(0, 0, 1), h)
 		}
 		if earliest.IsZero() || t.Before(earliest) {
 			earliest = t
@@ -153,9 +206,10 @@ const (
 )
 
 // nextWake 返回 now 之后最近的唤醒时刻与需执行的任务。
-// 排程语义唯一来源于纯函数 NextWake（outcome.go）；此处只把导出 Kind 映射回内部 taskKind。
+// 排程语义唯一来源于 NextWake（outcome.go）；此处只把导出 Kind 映射回内部 taskKind。
+// 抖动源用 s.rnd：Run 循环排定时现掷随机数并记下落点，供面板显示。
 func (s *Scheduler) nextWake(now time.Time) (time.Time, []taskKind) {
-	at, kinds := NextWake(now, s.cfg.Spec())
+	at, kinds := NextWake(now, s.cfg.Spec(), s.rnd)
 	if len(kinds) == 0 {
 		return time.Time{}, nil
 	}
@@ -214,11 +268,10 @@ func (s *Scheduler) dispatch(ctx context.Context, k taskKind) []Outcome {
 	return s.runKindCtx(ctx, taskToKind(k))
 }
 
-// RunCheckinCtx 带 ctx 的立即签到（当前 CheckinAll 遍历不检查 ctx，签名保留供
-// 后续接入；手动触发与定时循环统一入口）。
+// RunCheckinCtx 带 ctx 的立即签到（手动触发与定时循环统一入口）。
+// ctx 作用于账号间限速等待：取消后不再对剩余账号发起上游调用（上游调用本身不可取消）。
 func (s *Scheduler) RunCheckinCtx(ctx context.Context) []Outcome {
-	_ = ctx // 签到遍历为纯上游串行调用，暂无取消点（见计划"本期不假装有全局超时"）
-	ocs, err := s.CheckinAll()
+	ocs, err := s.checkinAll(ctx)
 	if err != nil {
 		log.Printf("scheduled checkin skipped: %v", err)
 		return nil
@@ -243,6 +296,12 @@ func (s *Scheduler) RunCheckinNow() []Outcome {
 // session dead 走 Pool.NoteSessionDead 的**连续计数**语义（与 keepalive 一致）：
 // 一次刷新失败不再立即杀号，连续 sessionDeadThreshold 次才禁用，刷新成功清计数。
 func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
+	return s.checkinAll(context.Background())
+}
+
+// checkinAll 签到遍历主体；ctx 仅供账号间限速的取消（上游调用本身不可取消，
+// 与 RunCheckinCtx 的既有说明一致）。
+func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 	if !s.checkinMu.TryLock() {
 		return nil, ErrBusy
 	}
@@ -251,6 +310,9 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 	statuses := s.cfg.Pool.List()
 	out := make([]CheckinOutcome, 0, len(statuses))
 	var okN, alreadyN, failN, skipN int
+	// first 标记"是否已有一个账号真正打过上游"：只有真正发起调用的账号之间才需要
+	// 限速，被跳过（禁用/无凭证/global）的账号不占用节拍。
+	first := true
 	for _, st := range statuses {
 		oc := CheckinOutcome{UID: st.UID, Nickname: st.Nickname}
 		if st.Disabled {
@@ -275,6 +337,13 @@ func (s *Scheduler) CheckinAll() ([]CheckinOutcome, error) {
 			out = append(out, oc)
 			continue
 		}
+		// 账号间限速（抖动）：真正要发起上游调用的账号之间才等待，跳过的账号不占节拍。
+		if !first {
+			if !pacedSleep(ctx, checkinAccountDelay) {
+				return out, nil // ctx 取消：剩余账号下一轮再签
+			}
+		}
+		first = false
 		// 停机跨过 token 有效期（关机过夜/容器长期停跑）时先补一次刷新，否则签到必然 401 白跑。
 		if a.NeedsRefresh(checkinRefreshSkew) {
 			if err := s.cfg.Upstream.RefreshToken(a); err != nil {
@@ -393,13 +462,15 @@ func (s *Scheduler) runActivity(ctx context.Context) []Outcome {
 		// 点亮连登）；realmBase 路由/头由 upstream.billingJSON/BillingHeaders 按 realm 切。
 		// 单账号失败只记 WARN 不影响遍历（下方 report err → break 该号 → continue 下号）。
 		if !first {
-			if !sleepCtx(ctx, activityAccountDelay) {
+			if !pacedSleep(ctx, activityAccountDelay) {
 				return out // 优雅停机：不等限速睡满，剩余账号下轮再报
 			}
 		}
 		first = false
 		// N 条共用同一 conversationId（同会话），requestId 各自独立（每条一个）。
-		cid := fmt.Sprintf("wb2api-%d", time.Now().UnixMilli())
+		// 用不可预测的 32 hex：旧实现是 wb2api-<UnixMilli>，既把固定品牌前缀甩在上游
+		// 事件里，又把"这个号几点几分报的"直接编码进 ID——两者都是白送的风控特征。
+		cid := newOpaqueID()
 		ok := 0
 		for i := 1; i <= count; i++ {
 			rid := fmt.Sprintf("%s-r%d", cid, i)
@@ -410,8 +481,8 @@ func (s *Scheduler) runActivity(ctx context.Context) []Outcome {
 			log.Printf("activity %s: report %d/%d ok", logfmt.UID8(a.UID), i, count)
 			ok++
 			if i < count {
-				// 账号内 5 条之间间隔，避免秒发风控；取消时立即放弃本号剩余条数。
-				if !sleepCtx(ctx, activityReportGap) {
+				// 账号内 5 条之间间隔（抖动），避免秒发风控；取消时立即放弃本号剩余条数。
+				if !pacedSleep(ctx, activityReportGap) {
 					return out
 				}
 			}

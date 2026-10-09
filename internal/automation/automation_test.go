@@ -44,6 +44,33 @@ func (f *fakeRunner) called(k scheduler.Kind) bool {
 	return false
 }
 
+// newScheduledManager 构建管理器并驱动定时循环，等 checkin 排定出落点后返回。
+//
+// 面板的 next_fire 读的是循环排定时掷出的落点，所以断言"启用任务有时刻、禁用任务
+// 无时刻"必须先把循环跑起来——没跑循环时是「待排定」，不是「没实现」。
+func newScheduledManager(t *testing.T, spec scheduler.ScheduleSpec) *Manager {
+	t.Helper()
+	m := New(Config{
+		Runner:      &fakeRunner{},
+		Spec:        spec,
+		HistoryFile: filepath.Join(t.TempDir(), "a.json"),
+		LoopEnabled: true,
+	})
+	t.Cleanup(m.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go m.Run(ctx)
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := m.rnd.Scheduled(string(scheduler.KindCheckin)); ok {
+			return m
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("3s 内 checkin 未排定出落点")
+	return m
+}
+
 // testSpec 只有 checkin 启用（9 点），其余禁用（hours 非空保持语义一致）。
 func testSpec() scheduler.ScheduleSpec {
 	return scheduler.ScheduleSpec{
@@ -144,8 +171,7 @@ func TestManagerUnknownKindRejected(t *testing.T) {
 }
 
 func TestReconfigureValidationAndHotApply(t *testing.T) {
-	m := New(Config{Runner: &fakeRunner{}, Spec: testSpec(), HistoryFile: filepath.Join(t.TempDir(), "a.json")})
-	defer m.Close()
+	m := newScheduledManager(t, testSpec())
 
 	// 非法小时 → 400 语义。
 	bad := testSpec()
@@ -175,17 +201,20 @@ func TestReconfigureValidationAndHotApply(t *testing.T) {
 	if found == nil || !found.Enabled || found.Hours[0] != 20 {
 		t.Fatalf("kind status after apply: %+v", found)
 	}
-	if found.NextFire == nil {
-		t.Fatal("next_fire nil after apply")
+	// 热更新后循环需被唤醒才会重排（并掷新的落点），故轮询等待而不是立即断言。
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if at, ok := m.rnd.Scheduled(string(scheduler.KindCheckin)); ok && at.Hour() == 20 {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if got := found.NextFire.Hour(); got != 20 {
-		t.Errorf("next_fire hour=%d want 20（热更新立即反映）", got)
-	}
+	at, _ := m.rnd.Scheduled(string(scheduler.KindCheckin))
+	t.Errorf("热更新后 3s 内未重排到 20 点窗口，落点=%v", at)
 }
 
 func TestStatusNextFireDisabledNil(t *testing.T) {
-	m := New(Config{Runner: &fakeRunner{}, Spec: testSpec(), HistoryFile: filepath.Join(t.TempDir(), "a.json")})
-	defer m.Close()
+	m := newScheduledManager(t, testSpec())
 	st := m.Status()
 	for _, k := range st.Kinds {
 		switch k.Kind {
@@ -198,6 +227,69 @@ func TestStatusNextFireDisabledNil(t *testing.T) {
 				t.Errorf("%s disabled → next_fire 应为空", k.Kind)
 			}
 		}
+	}
+	// 循环在跑：next_fire 读的是掷出的落点，绝不能落在整点。
+	for _, k := range st.Kinds {
+		if k.NextFire == nil {
+			continue
+		}
+		if k.NextFire.Minute() == 0 && k.NextFire.Second() == 0 {
+			t.Errorf("%s next_fire=%v 落在整点——应已被抖动打散", k.Kind, k.NextFire)
+		}
+	}
+}
+
+// TestScheduleRandomPerRound 每次排定都掷新的随机落点——用户的核心诉求
+// （「每次都是随机时间执行，不是你固定时间」）。
+//
+// 直接驱动排定（m.schedule）而不等真实定时器。断言的是"不同轮次掷出的值不同"，
+// 即旧实现那个按 (kind, 日, 小时) 哈希出来的固定偏移已被移除。
+func TestScheduleRandomPerRound(t *testing.T) {
+	m := New(Config{Runner: &fakeRunner{}, Spec: testSpec(), HistoryFile: filepath.Join(t.TempDir(), "a.json")})
+	defer m.Close()
+	now := time.Date(2026, 9, 25, 8, 0, 0, 0, time.Local)
+	seen := map[time.Time]int{}
+	for i := 0; i < 40; i++ {
+		if _, kinds := m.schedule(now); len(kinds) == 0 {
+			t.Fatal("checkin 启用却排不出任何任务")
+		}
+		at, ok := m.rnd.Scheduled(string(scheduler.KindCheckin))
+		if !ok {
+			t.Fatal("排定后应记下落点")
+		}
+		seen[at]++
+	}
+	if len(seen) < 2 {
+		t.Fatalf("40 轮排定只掷出 %d 个不同落点——抖动仍是固定的", len(seen))
+	}
+	// 每一轮都不得越出所配小时，也不得落在整点。
+	for at := range seen {
+		if at.Hour() != 9 {
+			t.Errorf("落点 %v 不在所配的 9 点窗口内", at)
+		}
+		if at.Minute() == 0 && at.Second() == 0 {
+			t.Errorf("落点 %v 落在整点", at)
+		}
+	}
+}
+
+// TestNextFireForHoursHourSemantics 配的小时被正确解析（含跨天）：nextFireForHours
+// 关闭抖动、结果可预期，因此适合断言"哪个小时"，与"随机落点是多少"分开测。
+func TestNextFireForHoursHourSemantics(t *testing.T) {
+	now := time.Date(2026, 9, 25, 20, 0, 0, 0, time.Local)
+	at := nextFireForHours(now, []int{9, 21}, false)
+	if at == nil || !at.Equal(time.Date(2026, 9, 25, 21, 0, 0, 0, time.Local)) {
+		t.Errorf("at=%v want 当日 21:00", at)
+	}
+	at = nextFireForHours(now, []int{9}, false)
+	if at == nil || !at.Equal(time.Date(2026, 9, 26, 9, 0, 0, 0, time.Local)) {
+		t.Errorf("at=%v want 次日 09:00", at)
+	}
+	if at := nextFireForHours(now, []int{9}, true); at != nil {
+		t.Errorf("禁用的任务不应有时点，got %v", at)
+	}
+	if at := nextFireForHours(now, nil, false); at != nil {
+		t.Errorf("空小时不应有时点，got %v", at)
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"workbuddy2api/internal/automation"
 	"workbuddy2api/internal/pool"
@@ -33,14 +34,72 @@ func newAutomationTestHandler(t *testing.T) *Handler {
 		}},
 		Spec:        specWithCheckinOnly(),
 		HistoryFile: filepath.Join(t.TempDir(), "automation.json"),
+		// 定时循环必须真跑起来：面板的 next_fire 读的是**循环排定时掷出的落点**
+		// （Randomizer.Scheduled），不跑循环就永远读不到值——那是「待排定」，
+		// 不是「没实现」。这也正是生产路径：main.go 传的就是同一个实例。
+		LoopEnabled: true,
 	})
 	t.Cleanup(m.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	go m.Run(ctx)
+	t.Cleanup(cancel)
 	return NewHandler(Config{
 		Pool:       pool.New(""),
 		APIKey:     "admin-key",
 		AdminKey:   "admin-key",
 		Automation: m,
 	})
+}
+
+// statusResp /admin/automation/status 的响应契约（面板与测试共用同一份字段名）。
+type statusResp struct {
+	Enabled bool `json:"enabled"`
+	Kinds   []struct {
+		Kind          string  `json:"kind"`
+		Enabled       bool    `json:"enabled"`
+		Hours         []int   `json:"hours"`
+		NextFire      *string `json:"next_fire"`
+		JitterMinutes int     `json:"jitter_minutes"`
+	} `json:"kinds"`
+}
+
+func getStatus(t *testing.T, h *Handler) statusResp {
+	t.Helper()
+	rec := adminGet(h, "/admin/automation/status")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status code=%d", rec.Code)
+	}
+	var st statusResp
+	if err := json.Unmarshal(rec.Body.Bytes(), &st); err != nil {
+		t.Fatalf("status not json: %s", rec.Body.String())
+	}
+	return st
+}
+
+// waitNextFire 轮询状态直到 kind 的 next_fire 出现并落在 wantHour 窗口内
+// （wantHour < 0 表示不关心小时）。
+//
+// 必须有这个轮询：**排定是定时循环异步做的**（它掷随机数并记下落点），热更新后
+// 还要等循环被唤醒重排。立即断言会与循环赛跑——那不是被测代码的问题。
+func waitNextFire(t *testing.T, h *Handler, kind string, wantHour int) *time.Time {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, k := range getStatus(t, h).Kinds {
+			if k.Kind != kind || k.NextFire == nil {
+				continue
+			}
+			at, err := time.Parse(time.RFC3339, *k.NextFire)
+			if err != nil {
+				continue
+			}
+			if wantHour < 0 || at.Hour() == wantHour {
+				return &at
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return nil
 }
 
 // specWithCheckinOnly 只有 checkin 启用（9 点）。
@@ -103,15 +162,7 @@ func TestAutomationStatusAndTriggerContract(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status code=%d", rec.Code)
 	}
-	var st struct {
-		Enabled bool `json:"enabled"`
-		Kinds   []struct {
-			Kind     string  `json:"kind"`
-			Enabled  bool    `json:"enabled"`
-			Hours    []int   `json:"hours"`
-			NextFire *string `json:"next_fire"`
-		} `json:"kinds"`
-	}
+	var st statusResp
 	if json.Unmarshal(rec.Body.Bytes(), &st) != nil {
 		t.Fatalf("status not json: %s", rec.Body.String())
 	}
@@ -123,12 +174,17 @@ func TestAutomationStatusAndTriggerContract(t *testing.T) {
 			if !k.Enabled || len(k.Hours) != 1 || k.Hours[0] != 9 {
 				t.Errorf("checkin status: %+v", k)
 			}
-			if k.NextFire == nil {
-				t.Error("checkin next_fire nil")
+			if k.JitterMinutes != 55 {
+				t.Errorf("checkin jitter_minutes=%d want 55（默认跨度）", k.JitterMinutes)
 			}
 		} else if k.NextFire != nil {
-			t.Errorf("%s disabled → next_fire 应为空", k.Kind)
+			t.Errorf("%s disabled → next_fire 应为空（禁用任务不排定）", k.Kind)
 		}
+	}
+	if at := waitNextFire(t, h, "checkin", 9); at == nil {
+		t.Error("checkin 已启用但 never 排定出 next_fire")
+	} else if at.Minute() == 0 && at.Second() == 0 {
+		t.Errorf("next_fire=%v 落在整点——应已被抖动打散", at)
 	}
 
 	// 触发：202 + 运行中记录（fake 同步返回，可能已完成——只断言结构）。
@@ -225,27 +281,52 @@ func TestAutomationApplyValidation(t *testing.T) {
 		t.Fatalf("apply code=%d body=%s", rec.Code, rec.Body.String())
 	}
 	var resp struct {
-		Status struct {
-			Kinds []struct {
-				Kind     string  `json:"kind"`
-				Enabled  bool    `json:"enabled"`
-				Hours    []int   `json:"hours"`
-				NextFire *string `json:"next_fire"`
-			} `json:"kinds"`
-		} `json:"status"`
+		Status statusResp `json:"status"`
 	}
 	if json.Unmarshal(rec.Body.Bytes(), &resp) != nil {
 		t.Fatalf("apply response not json")
 	}
 	for _, k := range resp.Status.Kinds {
-		if k.Kind != "checkin" {
-			continue
-		}
-		if !k.Enabled || k.Hours[0] != 20 || k.NextFire == nil {
+		if k.Kind == "checkin" && (!k.Enabled || k.Hours[0] != 20) {
 			t.Errorf("checkin after apply: %+v", k)
 		}
-		if got := k.NextFire; got != nil && !strings.Contains(*got, "T20:00:00") {
-			t.Errorf("next_fire=%s want 20:00:00（热更新立即生效）", *got)
+	}
+	// 热更新立即生效：next_fire 落到新配的 20 点窗口内。
+	// 具体分钟由现掷的随机偏移决定（刻意避开整点），故只断言小时与"非整点"。
+	// 循环需要被唤醒后才会重排，所以这里轮询而不是立即断言。
+	at := waitNextFire(t, h, "checkin", 20)
+	if at == nil {
+		t.Fatalf("热更新后 checkin 未在 3s 内重排到 20 点窗口：%s", dumpStatus(t, h))
+	}
+	if at.Minute() == 0 && at.Second() == 0 {
+		t.Errorf("next_fire=%v 落在整点——应已被抖动打散", at)
+	}
+}
+
+// dumpStatus 状态原始 JSON（断言失败时打印，便于看清到底排到了哪一小时）。
+func dumpStatus(t *testing.T, h *Handler) string {
+	t.Helper()
+	return adminGet(h, "/admin/automation/status").Body.String()
+}
+
+// TestAutomationApplyJitterDisabled 显式要求准点：jitter_disabled=true 后
+// next_fire 落在整点，且 status 回报的跨度为 0——面板据此显示"准点执行"。
+func TestAutomationApplyJitterDisabled(t *testing.T) {
+	h := newAutomationTestHandler(t)
+	rec := adminPost(h, "/admin/automation/apply", `{"schedule":{"jitter_disabled":true}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	at := waitNextFire(t, h, "checkin", -1)
+	if at == nil {
+		t.Fatalf("禁用抖动后未排定 next_fire：%s", dumpStatus(t, h))
+	}
+	if at.Minute() != 0 || at.Second() != 0 {
+		t.Errorf("jitter_disabled=true 却排到 %v（want 整点）", at)
+	}
+	for _, k := range getStatus(t, h).Kinds {
+		if k.Kind == "checkin" && k.JitterMinutes != 0 {
+			t.Errorf("jitter_minutes=%d want 0（准点）", k.JitterMinutes)
 		}
 	}
 }

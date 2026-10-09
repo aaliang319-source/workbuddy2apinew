@@ -97,6 +97,12 @@ MAPPING = {
 }
 
 # 夜猫时段（CST）23:00 - 次日 08:00
+#
+# 与 Go 侧 scheduler 的耦合：网关把 cat_hours 的触发时刻抖动到「所配小时 + [1s, 55min]」，
+# 上下界都不跨小时（见 internal/scheduler/random.go 的 jitterSpanMax = 55），
+# 所以窗口内的整点（23 与 0..7）抖动后仍在窗内。
+# 若哪天把跨度放宽到 >= 60 分钟，07 点的落点会顶到 08:00 —— 而这里判的是 hour < 8，
+# 08:00 整属于**窗外**，任务会被这里 skip 掉白跑一趟。改上限前先复核本函数。
 def within_night_window():
     try:
         import datetime as _dt

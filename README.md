@@ -29,6 +29,15 @@ WorkBuddy2APInew 是一个自托管的 **OpenAI 兼容反向代理网关**，将
 
 > ⚠️ 合规须知：本项目是**非官方**网关，使用 ```CodeBuddy``` 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
 
+### 界面预览
+
+内置 **Web 管理面板**（`gui/` 子项目，随 `docker compose up` 一并启动于 `:8787`），
+把账号、Key、统计、自动化、配置全部搬进浏览器 —— 完整截图见[核心能力 · Web 管理面板](#web-管理面板)。
+
+![仪表盘](assets/dashboard.png)
+
+> 截图中的账号名 / UID / API Key / 积分 / 邮箱均为演示占位数据。
+
 📖 更多说明见 [Wiki](https://github.com/aaliang319-source/workbuddy2apinew/wiki)。
 
 ## 核心能力
@@ -45,11 +54,15 @@ WorkBuddy2APInew 是一个自托管的 **OpenAI 兼容反向代理网关**，将
 
 - **分级熔断与冷却** — 429 软冷却（600s 起指数退避、封顶 `soft_rate_max`）、404 固定浅冷却、402 / 余额耗尽硬冷却至次日 04:00、连续失败熔断（`breaker_threshold` 触发后指数退避封顶 6h）
 - **模型级限流独立冷却** — 6004（该模型使用量超限）只冷却触发调用的模型，切其他模型立即可用；`/status` 透出 `rate_limited_models` 台账
+- **防风控（在途分摊）** — `pool.spread_in_flight`（默认开）：选号权重按 `1/(1+在途数)` 阻尼，并发请求自动分摊到空闲账号，降低单账号并发集中触发上游风控的概率
+- **403 账号级短冷却** — `pool.waf_cooldown`（默认 10m）：上游返回 403（WAF/风控页）时对该账号短冷却，期间流量自动切其他账号并触发通知；`0` = 仅模型级避让
+- **模型级故障转移** — `model_fallback` 白名单：主模型在域内所有账号均不可用（6004/11102/403/账号冷却）时，按序改用更便宜的候选模型；每请求独立游标，仍有健康候选则终止回退
 - **状态持久化** — 池状态（积分 / 冷却 / 熔断 / 计数）本地原子落盘 `state.json`，可选镜像至 Upstash Redis，重启后择优恢复
 
 ### 请求链路
 
 - **流式 + 非流式** — 出站强制 `stream:true`；SSE 帧按 OpenAI 规范白名单重建；非流式由本地聚合为单响应
+- **图片多模态透传** — `image_url` / base64 图片内容原样透传给上游多模态模型，网关不下载、不落盘、不改写
 - **DeepSeek 思维链注入** — 出站请求体注入 `thinking.type=enabled` + 默认档位，`reasoning_content` 多轮回填，`reasoning_effort` 按模型档位自动降级
 - **系统提示词体系** — 默认透传客户端原始 system（`passthrough` 模式，缺省），仅自定义配置 `custom` 时网关用自有提示词替换客户端 system/developer（从源头消除模板句误报）；`passthrough` 模式遇拦截自动降级中性提示词重试
 - **会话头族注入** — 出站携带官方客户端会话头族（`X-Conversation-Request-ID` 聚合主键 · `X-Conversation-ID` 透传 · B3 链路），轮转 / 重试 / 路径回退复用同键，后台按对话轮聚合不再碎片化（issue #35）
@@ -65,6 +78,15 @@ WorkBuddy2APInew 是一个自托管的 **OpenAI 兼容反向代理网关**，将
 - **夜猫子任务**（01 点）— 夜猫窗口（23:00–08:00 CST）内补一次 black_cat 任务
 
 六类任务独立排程、独立开关（`schedule.*_enabled`），互不影响。
+
+**括号里的小时是窗口，不是执行时刻。** 实际触发时刻 = 所配小时 + **每次排定时现掷的随机偏移**（1 秒 – `schedule.jitter_minutes` 分钟，默认 55），因此：
+
+- **整点永远不会被选中**——`:00:00` 是所有自动化脚本最容易关联的共同指纹；
+- 同一天的落点也不固定，每次排定、每次重启都重新掷（不是按日期算出来的固定偏移）；
+- 偏移恒小于 1 小时，任务始终落在所配小时之内；上限硬编码 55 分钟，再大会跨出该小时，夜猫任务还会顶出 `23:00–08:00` 窗口而被脚本跳过；
+- 任务族各自独立掷随机数，配在同一小时（如签到与旅行都在 09 点）通常不再同刻并发。
+
+`schedule.jitter_disabled=true` 可按整点执行，仅用于排障需要精确时刻的场景。改动在「配置」页保存后立即热生效，无需重启网关。
 
 ### 双域适配
 
@@ -83,15 +105,18 @@ WorkBuddy2APInew 是一个自托管的 **OpenAI 兼容反向代理网关**，将
 
 - **`internal/keys`** — 网关侧 API Key 管理：签发 / 吊销 / 备注，支持多 Key 并存
 - Key 落盘 `data/keys.json`（`keys_file` 可配），旧模式单一静态 `api_key` 仍然兼容
+- **Key ↔ 账号多对多关联 + 优先级分层** — 每个请求只在该 Key 关联（且启用）的账号内选号；优先级数字越大越优先，高优先级层全部冷却/占满才降级
+- **Key 级模型限制** — 可为每个 Key 配置可用模型白名单 + 优先级：白名单外的请求自动改路由到优先级最高的可用模型，白名单内模型不可用时按优先级降序回退（典型用法：成本控制，只允许低倍率模型）
 - 请求明细按 Key 名归类（`key_name`），便于多租户 / 多客户端分摊排查
 
 ### 指标与统计
 
-- **`internal/metrics`** — 按 `(账号, 模型)` 维度统计调用次数 / 成功率 / 平均时延 / 积分消耗
+- **`internal/metrics`** — 三层统计：按模型聚合、按账号聚合、按 **账号 × 模型 × 按日** 三维聚合
 - 默认 `./data/metrics.json` 落盘（`server.metrics_file` 可配），可选镜像至 Upstash Redis
 - **开关 `server.metrics_enabled`（缺省 false）**：不开则不记录观测，`/v1/stats` 提示关闭
-- **`GET /v1/stats`** — 聚合统计 + 最近请求明细（`recent` 环形缓冲）；**`POST /v1/stats/reset`** 清零累计
-- **请求明细含「上游实际模型」** — 出站 `model` 为 `auto` 档时，记录上游回传的真实模型（`resp_model`），用于确认实际路由结果
+- **`GET /v1/stats`** — 聚合统计 + 最近请求明细（`recent` 环形缓冲）+ 按账号积分消耗（`usage`）；**`POST /v1/stats/reset`** 清零累计
+- **请求明细含「上游实际模型」** — 出站 `model` 为 `auto` 档时，记录上游回传的真实模型（`resp_model`）与原始请求名（`req_model`），用于确认实际路由结果
+- **积分消耗统计** — 三维聚合每桶存 `{积分, 请求数, prompt/completion/cache token}`：token 三元组是账号级官方价换算的输入。保留 30 天，重启不丢；旧版（v3）账号级数据自动迁移（模型维度标 `(unknown)`）
 
 ### 通知
 
@@ -117,26 +142,70 @@ WorkBuddy2APInew 是一个自托管的 **OpenAI 兼容反向代理网关**，将
 
 ### Web 管理面板
 
-`gui/` 是与之配套的独立 Web 控制台（Go 后端 + React/Vite 前端），把命令行操作搬进浏览器：
+`gui/` 是与之配套的独立 Web 控制台（Go 后端 + React/Vite 前端），把命令行操作搬进浏览器。
+`docker-compose.yml` 已包含 `wbgui` 服务，与网关一并启动（默认 `:8787`）。
 
-- **账号管理** — 发起 OAuth 授权、查看账号池状态、删除账号
-- **网关配置** — 表单 / JSON 双模式在线编辑，改前自动备份
-- **多 Key 管理** — 网页签发 / 吊销 API Key
-- **请求明细 / 统计** — 按模型聚合与逐条明细（含上游实际模型）
-- **自动化 / 通知** — 查看任务运行记录、配置通知
-- **系统操作** — 查询状态、重启网关（需挂载 `docker.sock`）
+#### 仪表盘
 
-启动方式见 [`gui/README.md`](gui/README.md)；`docker-compose.yml` 已包含 `wbgui` 服务（默认 `:8787`）。
+账号池健康度、积分总览、**积分消耗**（30 天趋势柱图 + 按账号消耗分布，点「详情」看逐日与模型分解）。
+
+![仪表盘](assets/dashboard.png)
+
+积分消耗详情：模型分解（含 token 用量）+ 逐日明细 + 官方价换算（「相当于官方 API ¥XX」）。
+
+![积分消耗详情](assets/usage-detail.png)
+
+#### 账号管理
+
+批量签到 / 刷新 Token / 猫猫旅行 / 查积分，逐账号状态（冷却、禁用、TOKEN 有效期、最近活动）与操作。
+
+![账号管理](assets/accounts.png)
+
+#### API Keys
+
+多 Key 签发 / 吊销、Key ↔ 账号多对多关联（优先级分层）、Key 级模型限制、cc-switch 一键导入深链。
+
+![API Keys](assets/keys.png)
+
+#### 请求统计
+
+按模型聚合的总请求 / 成功率 / 首字 / 吞吐 / 缓存命中 / 扣费，以及官方价换算（高峰/空闲时段可切）。
+
+![请求统计](assets/stats.png)
+
+#### 请求明细
+
+逐条请求记录：模型 / 账号 / 耗时 / 首字 / 输入输出 token / 缓存 / 扣费 / 命中的业务 Key / 协议 / 轮转次数 / 错误原因。
+
+![请求明细](assets/requests.png)
+
+#### 自动化
+
+六类定时任务的启用开关、执行时刻、下次执行时间、最近运行历史（成功/失败/跳过）。
+
+![自动化](assets/automation.png)
+
+#### 网关配置
+
+表单 / JSON 双模式在线编辑 `config.json`，改前自动备份，含账号池、冷却、超时、会话粘性、Redis 镜像、邮件通知等全部段落。
+
+![网关配置](assets/config.png)
+
+其余页面：**添加账号**（OAuth 授权向导）、**聊天测试**（在页面内直连网关调试）、**系统**（查看运行信息、重启网关，需挂载 `docker.sock`）。
+
+启动方式与面板自身配置见 [`gui/README.md`](gui/README.md)。
 
 ## 架构总览
 
 ```mermaid
 flowchart LR
     Client["客户端 / SDK\nOpenAI 兼容请求"] --> H
+    GUI["Web 管理面板\ngui/ :8787"] -. "/admin/* 管理 API" .-> H
 
     subgraph GWI["WorkBuddy2APInew 网关 :7863"]
         H["HTTP Handler\n鉴权 · 请求体上限 · 提示词改写 · 轮转"] --> P
         H --> S
+        H --> M["指标采集\n模型 / 账号 / 三维消耗"]
         P["账号池\n四因子加权 · 熔断 · 冷却 · 租约"] --> U
         S["会话粘性路由"] -.绑定镜像.-> REDIS
         T["定时调度\n签到 09/21 · 旅行 09/21 · 活跃 10 · 保活 22\n开学季 12 · 夜猫子 01"] --> P
@@ -145,6 +214,8 @@ flowchart LR
 
     P -. "读凭证 (0600)" .-> AUTH[("auths/*.json")]
     P -. "状态镜像" .-> REDIS[("Upstash Redis\n可选")]
+    M -. "data/metrics.json" .-> STATS[("统计落盘")]
+    H -. "通知派发" .-> NOTIFY["SMTP 告警"]
     U -->|"chat/completions (SSE)"| CB["CodeBuddy\ncopilot.tencent.com"]
     U -->|"billing / auth / growth"| CB
 ```
@@ -165,6 +236,10 @@ flowchart LR
 git clone https://github.com/aaliang319-source/workbuddy2apinew.git
 cd workbuddy2apinew
 cp config.example.json config.json
+
+# 管理面板登录凭据（docker compose 读取；缺失则 wbgui 启动报错）
+cp .env.example .env
+# 编辑 .env，把 WBGUI_PASSWORD 改成强口令
 ```
 
 编辑 `config.json`，**至少设置 `api_key`**（`留空 = 不鉴权`，公网部署务必设置）。示例中的 `test_key` 等均为占位符，`config.example.json` 不含任何真实密钥。
@@ -173,13 +248,16 @@ cp config.example.json config.json
 # 登录添加账号（重复执行可加多号）
 ./login.sh
 
-# 启动服务
+# 启动服务（网关 :7863 + 管理面板 :8787）
 docker compose up -d --build
 
 # 健康检查（无可用账号时 503）；service 字段用于确认打到的是本网关
 curl -s http://localhost:7863/healthz
 # {"healthy":2,"total":3,"service":"workbuddy2api"}
 ```
+
+管理面板随后可访问 **http://localhost:8787**（登录凭据由 `.env` 的 `WBGUI_USERNAME` / `WBGUI_PASSWORD` 指定，
+**默认密码务必修改**）。不想用面板可只起网关：`docker compose up -d wb2api`。
 
 `login.sh` 内置授权 URL 获取 + 浏览器登录 + token 轮询 + 首次签到 + `auths/workbuddy-<uid>.json` 落盘 + 容器重启，全程无 PKCE（state 由服务端签发）。账号池在容器启动时用 `auths/` 目录自动对齐，新增凭证文件即自动发现。
 

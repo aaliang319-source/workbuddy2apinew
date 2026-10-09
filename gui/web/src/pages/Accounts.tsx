@@ -13,12 +13,24 @@ import {
   fmtDuration,
   fmtISO,
   fmtNum,
+  fmtStamp,
   fmtTime,
   Modal,
   Spinner,
   statusBadge,
 } from '../ui'
 import TaskProgress from './TaskProgress'
+import {
+  Banknote,
+  Cat,
+  CheckCheck,
+  Keyboard,
+  KeyRound,
+  Plus,
+  RefreshCw,
+  Upload,
+  Users,
+} from 'lucide-react'
 
 type Filter = 'all' | 'healthy' | 'cooling' | 'problem' | 'expiring'
 
@@ -191,22 +203,25 @@ export default function Accounts({ session }: { session: SessionInfo }) {
   return (
     <>
       <div className="page-head">
-        <div>
+        <div className="page-head-left">
           <h1>账号管理</h1>
           <p>
             共 {accounts.length} 个账号
-            {selected.size > 0 && <span className="text-accent"> · 已选 {selected.size} 个</span>}
+            {selected.size > 0 && <> · <span className="text-accent">已选 {selected.size} 个</span></>}
           </p>
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 刷新
+            {loading ? <Spinner /> : <RefreshCw size={13} strokeWidth={1.9} />}
+            刷新
           </button>
           <button className="btn" onClick={() => setShowImport(true)} disabled={writeDisabled} title={writeDisabled ? '只读模式' : ''}>
-            📥 导入凭证
+            <Upload size={13} strokeWidth={1.9} />
+            导入凭证
           </button>
           <Link className="btn btn-primary" to="/login">
-            ➕ 添加账号
+            <Plus size={13} strokeWidth={2.2} />
+            添加账号
           </Link>
         </div>
       </div>
@@ -246,16 +261,20 @@ export default function Accounts({ session }: { session: SessionInfo }) {
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => void runBatch('checkin')} disabled={writeDisabled || accounts.length === 0}>
-            ✅ 批量签到
+            <CheckCheck size={13} strokeWidth={1.9} />
+            批量签到
           </button>
           <button className="btn" onClick={() => void runBatch('refresh')} disabled={writeDisabled || accounts.length === 0}>
-            🔑 批量刷新 Token
+            <KeyRound size={13} strokeWidth={1.9} />
+            批量刷新 Token
           </button>
           <button className="btn" onClick={() => void runBatch('travel')} disabled={writeDisabled || accounts.length === 0}>
-            🐱 批量猫猫旅行
+            <Cat size={13} strokeWidth={1.9} />
+            批量猫猫旅行
           </button>
           <button className="btn" onClick={() => void runBatch('credits')} disabled={accounts.length === 0}>
-            💰 批量查积分
+            <Banknote size={13} strokeWidth={1.9} />
+            批量查积分
           </button>
           {selected.size > 0 && (
             <button className="btn btn-ghost" onClick={() => setSelected(new Set())}>
@@ -295,20 +314,20 @@ export default function Accounts({ session }: { session: SessionInfo }) {
         {loading && accounts.length === 0 ? (
           <Spinner label="加载中…" />
         ) : filtered.length === 0 ? (
-          <Empty>
-            {accounts.length === 0 ? (
-              <>
-                还没有任何账号。
-                <div style={{ marginTop: 10 }}>
-                  <Link className="btn btn-primary btn-sm" to="/login">
-                    ➕ 添加第一个账号
-                  </Link>
-                </div>
-              </>
-            ) : (
-              '没有符合筛选条件的账号'
-            )}
-          </Empty>
+          accounts.length === 0 ? (
+            <Empty
+              icon={Users}
+              title="还没有任何账号"
+              hint="添加账号后可在这里批量签到、刷新 Token 与查询积分"
+            >
+              <Link className="btn btn-primary btn-sm" style={{ marginTop: 14 }} to="/login">
+                <Plus size={12} strokeWidth={2.2} />
+                添加第一个账号
+              </Link>
+            </Empty>
+          ) : (
+            <Empty icon={Keyboard} title="没有符合筛选条件的账号" hint="换个关键词，或把筛选切回「全部」" />
+          )
         ) : (
           <div className="table-wrap">
             <table>
@@ -386,8 +405,8 @@ export default function Accounts({ session }: { session: SessionInfo }) {
                         ) : (
                           <span className="text-ok">有效</span>
                         )}
-                        <div className="text-faint" style={{ fontSize: 11 }}>
-                          {fmtTime(a.expires_at)}
+                        <div className="text-faint mono" style={{ fontSize: 11 }}>
+                          {fmtStamp(a.expires_at)}
                         </div>
                       </td>
                       <td style={{ fontSize: 12 }} className="text-dim">
@@ -396,7 +415,7 @@ export default function Accounts({ session }: { session: SessionInfo }) {
                       <td>
                         <div className="page-actions" style={{ gap: 5 }}>
                           <button
-                            className="btn btn-sm"
+                            className="btn btn-ghost btn-sm"
                             disabled={busy || writeDisabled}
                             onClick={() => void runSingle(a, 'checkin')}
                             title="签到并刷新余额"
@@ -404,7 +423,7 @@ export default function Accounts({ session }: { session: SessionInfo }) {
                             签到
                           </button>
                           <button
-                            className="btn btn-sm"
+                            className="btn btn-ghost btn-sm"
                             disabled={busy || writeDisabled}
                             onClick={() => void runSingle(a, 'refresh')}
                             title="刷新 access token"
@@ -412,18 +431,18 @@ export default function Accounts({ session }: { session: SessionInfo }) {
                             刷新
                           </button>
                           <button
-                            className="btn btn-sm"
+                            className="btn btn-ghost btn-sm"
                             disabled={busy || writeDisabled}
                             onClick={() => void runSingle(a, 'travel')}
                             title="推进一趟猫猫旅行"
                           >
                             猫猫
                           </button>
-                          <button className="btn btn-sm" disabled={busy} onClick={() => void runSingle(a, 'credits')} title="查询余额">
+                          <button className="btn btn-ghost btn-sm" disabled={busy} onClick={() => void runSingle(a, 'credits')} title="查询余额">
                             积分
                           </button>
                           <button
-                            className="btn btn-sm"
+                            className="btn btn-ghost btn-sm"
                             disabled={busy || session.read_only || !a.in_gateway}
                             onClick={() => void doToggle(a)}
                             title={
@@ -437,7 +456,7 @@ export default function Accounts({ session }: { session: SessionInfo }) {
                             {a.disabled ? '启用' : '禁用'}
                           </button>
                           <button
-                            className="btn btn-sm btn-danger"
+                            className="btn btn-danger btn-sm"
                             disabled={busy || session.read_only || !session.dangerous_ops || !a.has_file}
                             onClick={() => setDeleteTarget(a)}
                             title={
@@ -594,7 +613,13 @@ function AccountDetail({ uid, onClose }: { uid: string; onClose: () => void }) {
             <dt>Token 过期</dt>
             <dd>{fmtTime(a.expires_at)}</dd>
             <dt>Refresh Token</dt>
-            <dd>{a.has_refresh_token ? '✅ 存在' : '❌ 缺失（无法刷新，需重登）'}</dd>
+            <dd>
+              {a.has_refresh_token ? (
+                <span className="text-ok">存在</span>
+              ) : (
+                <span className="text-danger">缺失（无法刷新，需重登）</span>
+              )}
+            </dd>
             <dt>网关状态</dt>
             <dd>
               <Badge cls={statusBadge(a.status).cls}>{statusBadge(a.status).text}</Badge>

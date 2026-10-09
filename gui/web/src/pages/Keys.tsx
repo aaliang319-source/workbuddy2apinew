@@ -8,6 +8,7 @@ import { api, ApiError } from '../api'
 import type { Account, ApiKeyEntry, KeyAssociation, KeyModel } from '../types'
 import { buildCcSwitchLink, gatewayEndpoint, minimalCcSwitchFields } from '../ccswitch'
 import { Alert, Badge, ConfirmDialog, fmtISO, Modal, Spinner } from '../ui'
+import { Check, Plus, RefreshCw } from 'lucide-react'
 
 /** KeysData Keys 页数据：Key 列表 + 账号列表（供关联选择器）。 */
 interface KeysData {
@@ -105,10 +106,10 @@ export default function Keys({ writable }: { writable: boolean }) {
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 刷新
+            {loading ? <Spinner /> : <RefreshCw size={13} strokeWidth={1.9} />} 刷新
           </button>
           <button className="btn btn-primary" onClick={() => setCreating(true)} disabled={!writable}>
-            ➕ 新建 Key
+            <Plus size={13} strokeWidth={2.2} /> 新建 Key
           </button>
         </div>
       </div>
@@ -335,13 +336,13 @@ function CcSwitchButtons({ keyName, apiKey }: { keyName: string; apiKey: string 
         CC·Claude
       </a>{' '}
       <button className="btn btn-sm" onClick={() => void copy('claude', claudeLink)} title="复制 Claude 深链">
-        {copied === 'claude' ? '✓' : '复制'}
+        {copied === 'claude' ? <Check size={12} strokeWidth={2.4} /> : '复制'}
       </button>{' '}
       <a className="btn btn-sm btn-primary" href={codexLink} style={{ textDecoration: 'none' }} title="唤起本机 CC Switch 导入为 Codex 供应商">
         CC·Codex
       </a>{' '}
       <button className="btn btn-sm" onClick={() => void copy('codex', codexLink)} title="复制 Codex 深链">
-        {copied === 'codex' ? '✓' : '复制'}
+        {copied === 'codex' ? <Check size={12} strokeWidth={2.4} /> : '复制'}
       </button>{' '}
     </>
   )

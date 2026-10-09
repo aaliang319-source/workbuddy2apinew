@@ -7,6 +7,7 @@ import { api, ApiError } from '../api'
 import type { Account, RequestRecord, SessionInfo, StatsResponse } from '../types'
 import { Alert, Empty, Spinner, displayName } from '../ui'
 import { fmtClock, fmtCredit, fmtFull, fmtMs, fmtTok, statusTone } from '../format'
+import { ArrowLeft, ArrowRight, RefreshCw } from 'lucide-react'
 
 export default function Requests({ session: _session }: { session: SessionInfo }) {
   const [resp, setResp] = useState<StatsResponse | null>(null)
@@ -152,7 +153,7 @@ export default function Requests({ session: _session }: { session: SessionInfo }
             自动刷新（5s）
           </label>
           <button className="btn" onClick={() => { void load(); void loadAccounts() }} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 刷新
+            {loading ? <Spinner /> : <RefreshCw size={13} strokeWidth={1.9} />} 刷新
           </button>
         </div>
       </div>
@@ -379,10 +380,10 @@ export default function Requests({ session: _session }: { session: SessionInfo }
             </span>
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="btn btn-sm" disabled={pageSafe === 0} onClick={() => setPage(pageSafe - 1)}>
-                ← 上一页
+                <ArrowLeft size={13} strokeWidth={1.9} /> 上一页
               </button>
               <button className="btn btn-sm" disabled={pageSafe >= pageCount - 1} onClick={() => setPage(pageSafe + 1)}>
-                下一页 →
+                下一页 <ArrowRight size={13} strokeWidth={1.9} />
               </button>
             </div>
           </div>

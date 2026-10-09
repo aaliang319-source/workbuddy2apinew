@@ -3,7 +3,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, ApiError } from '../api'
 import type { Account, AccountUsage, Overview, UsageRange, UsageSnapshot } from '../types'
-import { Alert, Badge, displayName, fmtDuration, fmtISO, fmtNum, Spinner, statusBadge } from '../ui'
+import { Alert, Badge, displayName, Empty, fmtDuration, fmtISO, fmtNum, Spinner, statusBadge } from '../ui'
+import { ArrowRight, ChartColumn, CircleCheck, Plus, RefreshCw } from 'lucide-react'
 import UsageDetailDialog from './UsageDetailDialog'
 
 export default function Dashboard() {
@@ -58,17 +59,18 @@ export default function Dashboard() {
   return (
     <>
       <div className="page-head">
-        <div>
+        <div className="page-head-left">
           <h1>仪表盘</h1>
           <p>
             账号池实时健康度与积分总览
-            {refreshedAt && <span className="text-faint"> · 更新于 {refreshedAt.toLocaleTimeString('zh-CN', { hour12: false })}</span>}
-            <span className="text-faint"> · 每 15 秒自动刷新</span>
+            {refreshedAt && <> · 更新于 {refreshedAt.toLocaleTimeString('zh-CN', { hour12: false })}</>}
+            {' · 每 15 秒自动刷新'}
           </p>
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 立即刷新
+            {loading ? <Spinner /> : <RefreshCw size={13} strokeWidth={1.9} />}
+            立即刷新
           </button>
         </div>
       </div>
@@ -96,7 +98,7 @@ export default function Dashboard() {
         <Alert kind="warn">
           有 <strong>{ov.expired}</strong> 个账号 token 已过期、<strong>{ov.expiring}</strong> 个即将过期。
           <Link to="/accounts" style={{ marginLeft: 6 }}>
-            去账号管理批量刷新 →
+            去账号管理批量刷新 <ArrowRight size={12} strokeWidth={1.9} />
           </Link>
         </Alert>
       )}
@@ -116,28 +118,49 @@ export default function Dashboard() {
 
       {ov && (
         <>
-          <div className="grid grid-stats" style={{ marginBottom: 16 }}>
-            <Stat
-              label="网关账号池"
-              value={`${ov.healthy}/${ov.total}`}
-              sub={ov.total === 0 ? '尚未添加任何账号' : `可用 / 总数`}
-              tone={ov.healthy === 0 ? 'danger' : ov.healthy < ov.total ? 'warn' : 'ok'}
-            />
-            <Stat label="冷却中" value={String(ov.cooling)} sub="限流 / 熔断冷却" tone={ov.cooling > 0 ? 'warn' : undefined} />
-            <Stat label="已禁用" value={String(ov.disabled)} sub="需重新登录" tone={ov.disabled > 0 ? 'danger' : undefined} />
-            <Stat
-              label="剩余积分"
-              value={fmtNum(ov.credits.remain)}
-              sub={ov.credits.size > 0 ? `总量 ${fmtNum(ov.credits.size)}` : '未查询到配额'}
-            />
-            <Stat label="在途请求" value={String(ov.in_flight)} sub={`满载账号 ${ov.in_flight_full} 个`} />
-            <Stat label="粘性会话" value={String(ov.sticky_sessions)} sub={`Redis：${ov.redis_mode}`} />
-            <Stat
-              label="凭证文件"
-              value={String(ov.file_count)}
-              sub={ov.expired > 0 ? `${ov.expired} 个已过期` : '全部有效'}
-              tone={ov.expired > 0 ? 'warn' : undefined}
-            />
+          <div className="hero">
+            <div className="hero-lead">
+              <div className="stat-label">账号池健康度</div>
+              <div
+                className={`hero-value ${
+                  ov.healthy === 0 ? 'text-danger' : ov.healthy < ov.total ? 'text-warn' : 'text-ok'
+                }`}
+              >
+                {ov.healthy}
+                <span className="hero-total">/ {ov.total} 可用</span>
+              </div>
+              <div className="stat-sub">
+                {ov.total === 0 ? '尚未添加任何账号' : `冷却 ${ov.cooling} · 禁用 ${ov.disabled}`}
+              </div>
+            </div>
+
+            <div className="hero-metrics">
+              <Stat
+                label="剩余积分"
+                value={fmtNum(ov.credits.remain)}
+                sub={ov.credits.size > 0 ? `总量 ${fmtNum(ov.credits.size)}` : '未查询到配额'}
+              />
+              <Stat label="在途请求" value={String(ov.in_flight)} sub={`满载账号 ${ov.in_flight_full} 个`} />
+              <Stat label="粘性会话" value={String(ov.sticky_sessions)} sub={`Redis：${ov.redis_mode}`} />
+              <Stat
+                label="冷却中"
+                value={String(ov.cooling)}
+                sub="限流 / 熔断"
+                tone={ov.cooling > 0 ? 'warn' : undefined}
+              />
+              <Stat
+                label="已禁用"
+                value={String(ov.disabled)}
+                sub="需重新登录"
+                tone={ov.disabled > 0 ? 'danger' : undefined}
+              />
+              <Stat
+                label="凭证文件"
+                value={String(ov.file_count)}
+                sub={ov.expired > 0 ? `${ov.expired} 个已过期` : '全部有效'}
+                tone={ov.expired > 0 ? 'warn' : undefined}
+              />
+            </div>
           </div>
 
           <UsageCard
@@ -153,7 +176,7 @@ export default function Dashboard() {
               <div className="card-head">
                 <h2>积分最高的账号</h2>
                 <Link to="/accounts" className="hint">
-                  查看全部 →
+                  查看全部 <ArrowRight size={12} strokeWidth={1.9} />
                 </Link>
               </div>
               {topAccounts.length === 0 ? (
@@ -161,7 +184,8 @@ export default function Dashboard() {
                   还没有账号。
                   <div style={{ marginTop: 10 }}>
                     <Link className="btn btn-primary btn-sm" to="/login">
-                      ➕ 添加第一个账号
+                      <Plus size={12} strokeWidth={2.2} />
+                      添加第一个账号
                     </Link>
                   </div>
                 </div>
@@ -207,7 +231,7 @@ export default function Dashboard() {
                 <span className="hint">{problems.length} 个</span>
               </div>
               {problems.length === 0 ? (
-                <div className="empty">🎉 所有账号状态正常</div>
+                <Empty icon={CircleCheck} title="所有账号状态正常" hint="冷却与 token 均无异常" />
               ) : (
                 <div className="table-wrap">
                   <table>
@@ -390,10 +414,20 @@ function UsageCard({
         </div>
       </div>
 
-      <div className="grid grid-stats" style={{ marginBottom: 14 }}>
-        <Stat label="今日" value={fmtCredit(usage.today)} sub={usage.yesterday > 0 ? `昨日 ${fmtCredit(usage.yesterday)}` : undefined} />
-        <Stat label="近 7 天" value={fmtCredit(usage.last_7d)} sub={`日均 ${fmtCredit(usage.last_7d / 7)}`} />
-        <Stat label="累计" value={fmtCredit(usage.total)} sub={`保留 30 天口径`} />
+      <div className="hero" style={{ paddingBottom: 18, marginBottom: 18 }}>
+        <div className="hero-lead">
+          <div className="stat-label">累计消耗</div>
+          <div className="hero-value">{fmtCredit(usage.total)}</div>
+          <div className="stat-sub">保留 30 天口径</div>
+        </div>
+        <div className="metric-row">
+          <Stat
+            label="今日"
+            value={fmtCredit(usage.today)}
+            sub={usage.yesterday > 0 ? `昨日 ${fmtCredit(usage.yesterday)}` : undefined}
+          />
+          <Stat label="近 7 天" value={fmtCredit(usage.last_7d)} sub={`日均 ${fmtCredit(usage.last_7d / 7)}`} />
+        </div>
       </div>
 
       {trendMax > 0 && (
@@ -412,8 +446,7 @@ function UsageCard({
                     flex: 1,
                     height: h,
                     borderRadius: 2,
-                    background: d.credit > 0 ? 'var(--accent)' : 'var(--bg-subtle, rgba(128,128,128,.2))',
-                    opacity: d.credit > 0 ? 1 : 0.4,
+                    background: d.credit > 0 ? 'var(--chart-bar)' : 'var(--chart-bar-empty)',
                     minWidth: 2,
                   }}
                 />
@@ -428,51 +461,42 @@ function UsageCard({
       )}
 
       {rows.length === 0 ? (
-        <div className="empty">还没有消耗记录 —— 发起一次对话后这里会出现按账号的消耗分布。</div>
+        <Empty
+          icon={ChartColumn}
+          title="还没有消耗记录"
+          hint="发起一次对话后这里会出现按账号的消耗分布"
+        />
       ) : (
         <div>
+          {/* 表头：与下方行同为四列网格，保证数字列对齐。 */}
+          <div className="usage-row usage-head">
+            <span>账号</span>
+            <span className="usage-track" />
+            <span className="num">消耗</span>
+            <span className="num">请求</span>
+            <span />
+          </div>
           {rows.map(({ u, v }) => (
-            <div key={u.uid} style={{ marginBottom: 10 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
-                <span style={{ fontSize: 12.5 }}>
-                  {u.nickname || <span className="text-faint">未知账号</span>}
-                  <span className="mono text-faint" style={{ fontSize: 11, marginLeft: 6 }}>
-                    {u.uid}
-                  </span>
-                </span>
-                <span className="mono" style={{ fontSize: 12.5 }}>
-                  {fmtCredit(v)}
-                  <span className="text-faint" style={{ fontSize: 11, marginLeft: 6 }}>
-                    {u.requests} 次
-                  </span>
-                  <button
-                    className="btn btn-sm"
-                    style={{ marginLeft: 8, padding: '1px 6px', fontSize: 11 }}
-                    onClick={() => onOpenDetail(u)}
-                  >
-                    详情
-                  </button>
-                </span>
-              </div>
-              <div
-                style={{
-                  height: 8,
-                  borderRadius: 4,
-                  background: 'var(--bg-subtle, rgba(128,128,128,.15))',
-                  overflow: 'hidden',
-                }}
-              >
-                {v > 0 && (
-                  <div
-                    style={{
-                      width: `${max > 0 ? (v / max) * 100 : 0}%`,
-                      height: '100%',
-                      borderRadius: 4,
-                      background: 'var(--accent)',
-                    }}
-                  />
-                )}
-              </div>
+            <div key={u.uid} className="usage-row">
+              <span className="usage-name">
+                {u.nickname || <span className="text-faint">未知账号</span>}
+                <span className="mono text-faint usage-uid">{u.uid}</span>
+              </span>
+              {/* 比例条改为中性底 + 主色填充：颜色只编码「占比」，
+                  由行高与长度承担排名，避免 12 行饱和红同时叫喊。 */}
+              <span className="usage-track">
+                <span
+                  className="usage-fill"
+                  style={{ width: `${max > 0 ? (v / max) * 100 : 0}%` }}
+                />
+              </span>
+              <span className="num">{fmtCredit(v)}</span>
+              <span className="num text-faint">{u.requests}</span>
+              <span className="usage-act">
+                <button className="btn btn-ghost btn-sm" onClick={() => onOpenDetail(u)}>
+                  详情
+                </button>
+              </span>
             </div>
           ))}
           <div className="desc" style={{ marginTop: 8 }}>

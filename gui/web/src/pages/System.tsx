@@ -5,6 +5,7 @@ import { api, ApiError } from '../api'
 import type { SessionInfo, SystemInfo, TaskListResponse } from '../types'
 import { Alert, Badge, ConfirmDialog, fmtDuration, fmtISO, Modal, Spinner } from '../ui'
 import { buildCcSwitchLink, parseListenPort, type CcSwitchFields } from '../ccswitch'
+import { Check, KeyRound, RefreshCw, RotateCcw } from 'lucide-react'
 
 // ─── CC Switch 一键导入 ────────────────────────────────────────────────
 // 深链生成逻辑已抽取到 ../ccswitch.ts（System 页与 Keys 页共用）。
@@ -131,7 +132,13 @@ function CcSwitchCard() {
             导入 Claude Code 供应商
           </a>{' '}
           <button className="btn" onClick={() => void copyLink('claude')}>
-            {copied === 'claude' ? '已复制 ✓' : '复制 Claude 链接'}
+            {copied === 'claude' ? (
+              <>
+                <Check size={12} strokeWidth={2.4} /> 已复制
+              </>
+            ) : (
+              '复制 Claude 链接'
+            )}
           </button>
         </div>
         <div>
@@ -139,7 +146,13 @@ function CcSwitchCard() {
             导入 Codex 供应商
           </a>{' '}
           <button className="btn" onClick={() => void copyLink('codex')}>
-            {copied === 'codex' ? '已复制 ✓' : '复制 Codex 链接'}
+            {copied === 'codex' ? (
+              <>
+                <Check size={12} strokeWidth={2.4} /> 已复制
+              </>
+            ) : (
+              '复制 Codex 链接'
+            )}
           </button>
         </div>
       </div>
@@ -225,7 +238,7 @@ export default function System({
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 刷新
+            {loading ? <Spinner /> : <RefreshCw size={13} strokeWidth={1.9} />} 刷新
           </button>
           <button
             className="btn btn-primary"
@@ -239,7 +252,7 @@ export default function System({
                   : '重启网关容器以加载新账号/新配置'
             }
           >
-            🔁 重启网关
+            <RotateCcw size={13} strokeWidth={1.9} /> 重启网关
           </button>
         </div>
       </div>
@@ -272,7 +285,8 @@ export default function System({
           <dt>身份标识</dt>
           <dd>
             {gatewayServiceOK ? (
-              <>service = <span className="mono">workbuddy2api</span> ✅</>
+              <>service = <span className="mono">workbuddy2api</span>
+              <Check size={12} strokeWidth={2.4} className="text-ok" /></>
             ) : (
               <span className="text-danger">{info?.gateway_health_error || '无法确认身份'}</span>
             )}
@@ -324,7 +338,7 @@ export default function System({
             disabled={!session.password_changeable}
             title={session.password_changeable ? '修改面板登录口令' : '服务端未配置凭据持久化，无法从网页改密码'}
           >
-            🔑 修改密码
+            <KeyRound size={13} strokeWidth={1.9} /> 修改密码
           </button>
         </div>
         <dl className="kv">
@@ -348,7 +362,11 @@ export default function System({
             )}
           </dd>
           <dt>Docker 可用</dt>
-          <dd>{info?.docker_available ? '✅ 是' : '❌ 否（容器控制已降级）'}</dd>
+          <dd>{info?.docker_available ? (
+            <span className="text-ok">是</span>
+          ) : (
+            <span className="text-danger">否（容器控制已降级）</span>
+          )}</dd>
         </dl>
       </div>
 

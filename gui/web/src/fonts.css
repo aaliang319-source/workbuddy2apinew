@@ -1,0 +1,13 @@
+/* fonts.css 自托管字体（Inter + JetBrains Mono）。
+ *
+ * 不引 Google Fonts CDN：面板常部署在内网 / 容器中，外网字体拿不到时首次
+ * 渲染会被阻塞（实测走 CDN 时浏览器截图直接超时）。
+ *
+ * 只取 latin 子集：中文由系统字体回退（PingFang SC / Microsoft YaHei），
+ * 与设计规范 §2 一致——中文字形交给系统渲染更清晰，也避免几 MB 的下载。
+ * 两个文件都是可变字体，一条 @font-face 覆盖 100–900 全部字重。
+ * 文件在 public/fonts/，随构建产物一起进 Go embed，离线可用。
+ */
+
+@font-face{font-family:'Inter';font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/inter-var.woff2) format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:100 900;font-display:swap;src:url(/fonts/jetbrains-mono-var.woff2) format('woff2');unicode-range:U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD}

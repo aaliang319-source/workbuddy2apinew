@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, ApiError, streamChat } from '../api'
 import type { ChatMessage, Model } from '../types'
 import { Alert, fmtNum, Spinner } from '../ui'
+import { Play, RefreshCw, Trash, X } from 'lucide-react'
 
 interface Bubble {
   role: 'user' | 'assistant'
@@ -201,10 +202,10 @@ export default function Playground() {
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => void loadModels()}>
-            🔄 刷新模型列表
+            <RefreshCw size={13} strokeWidth={1.9} /> 刷新模型列表
           </button>
           <button className="btn" onClick={clearChat} disabled={messages.length === 0}>
-            🗑️ 清空对话
+            <Trash size={13} strokeWidth={1.9} /> 清空对话
           </button>
         </div>
       </div>
@@ -357,7 +358,7 @@ export default function Playground() {
               </button>
             ) : (
               <button className="btn btn-primary" onClick={() => void send()} disabled={!input.trim() || !model}>
-                ▶️ 发送
+                <Play size={13} strokeWidth={2} /> 发送
               </button>
             )}
             <span className="hint">Ctrl + Enter 快捷发送</span>
@@ -371,7 +372,7 @@ export default function Playground() {
             <div className="modal-head">
               <h2>原始响应数据</h2>
               <button className="btn btn-ghost btn-sm" onClick={() => setShowRaw(null)}>
-                ✕
+                <X size={13} strokeWidth={2} />
               </button>
             </div>
             <div className="muted-box" style={{ maxHeight: 420, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{showRaw}</div>

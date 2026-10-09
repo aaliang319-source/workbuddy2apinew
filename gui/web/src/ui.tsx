@@ -1,6 +1,7 @@
 // ui.tsx 通用展示组件与格式化工具。
 
 import React, { useEffect } from 'react'
+import { CircleAlert, CircleCheck, Info, TriangleAlert, X, type LucideIcon } from 'lucide-react'
 
 /** 把 Unix 秒格式化为本地时间字符串。 */
 export function fmtTime(sec?: number): string {
@@ -32,6 +33,14 @@ export function fmtISO(iso?: string): string {
   if (diff < 86_400_000) return `${Math.round(diff / 3_600_000)} 小时前`
   if (diff < 30 * 86_400_000) return `${Math.round(diff / 86_400_000)} 天前`
   return d.toLocaleString('zh-CN', { hour12: false })
+}
+
+/** 紧凑时间戳「2026-12-21 17:00」：表格里不显示秒与相对时间，省一半宽度。 */
+export function fmtStamp(sec?: number): string {
+  if (!sec || sec <= 0) return '—'
+  const d = new Date(sec * 1000)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
 /** 格式化秒数为「1h 23m 45s」。 */
@@ -93,6 +102,23 @@ export function coolKindText(kind?: string): string {
   }
 }
 
+/** 品牌标：主色圆角方块里的几何 W。颜色跟随 CSS 变量，双主题自动适配。 */
+export function BrandMark({ size = 28 }: { size?: number }) {
+  return (
+    <svg className="brand-mark" width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
+      <rect width="32" height="32" rx="7.5" fill="var(--accent)" />
+      <path
+        d="M8.4 10.2 L11.7 21.8 L16 14.4 L20.3 21.8 L23.6 10.2"
+        fill="none"
+        stroke="var(--accent-fg)"
+        strokeWidth="2.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
 export function Badge({ cls, children }: { cls: string; children: React.ReactNode }) {
   return (
     <span className={`badge ${cls}`}>
@@ -111,14 +137,16 @@ export function Alert({
   children: React.ReactNode
   onClose?: () => void
 }) {
-  const icon = { error: '⛔', warn: '⚠️', ok: '✅', info: 'ℹ️' }[kind]
+  const Icon = { error: CircleAlert, warn: TriangleAlert, ok: CircleCheck, info: Info }[kind]
   return (
     <div className={`alert alert-${kind}`}>
-      <span className="alert-icon">{icon}</span>
+      <span className="alert-icon">
+        <Icon size={14} strokeWidth={1.9} />
+      </span>
       <div style={{ flex: 1, minWidth: 0 }}>{children}</div>
       {onClose && (
         <button className="btn btn-ghost btn-sm" onClick={onClose} aria-label="关闭">
-          ✕
+          <X size={13} strokeWidth={2} />
         </button>
       )}
     </div>
@@ -164,7 +192,7 @@ export function Modal({
         <div className="modal-head">
           <h2>{title}</h2>
           <button className="btn btn-ghost btn-sm" onClick={onClose} aria-label="关闭">
-            ✕
+            <X size={13} strokeWidth={2} />
           </button>
         </div>
         {children}
@@ -183,8 +211,30 @@ export function Spinner({ label }: { label?: string }) {
   )
 }
 
-export function Empty({ children }: { children: React.ReactNode }) {
-  return <div className="empty">{children}</div>
+/** Empty 空态：居中图标 + 主文案，可选一行辅助说明与操作。 */
+export function Empty({
+  icon: Icon,
+  title,
+  hint,
+  children,
+}: {
+  icon?: LucideIcon
+  title?: React.ReactNode
+  hint?: React.ReactNode
+  children?: React.ReactNode
+}) {
+  // 未传 icon 时保持纯文字形态，兼容既有调用点。
+  if (!Icon) return <div className="empty">{children ?? title}</div>
+  return (
+    <div className="empty">
+      <div className="empty-icon">
+        <Icon size={22} strokeWidth={1.5} />
+      </div>
+      {title && <div className="empty-title">{title}</div>}
+      {hint && <div className="empty-hint">{hint}</div>}
+      {children}
+    </div>
+  )
 }
 
 /** ConfirmDialog 危险操作二次确认。 */

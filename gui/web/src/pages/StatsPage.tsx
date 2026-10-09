@@ -7,6 +7,7 @@ import { api, ApiError } from '../api'
 import type { ModelCost, ModelStat, ModelPrice, SessionInfo, StatsResponse } from '../types'
 import { Alert, Empty, fmtDuration, fmtISO, fmtNum, Modal, Spinner } from '../ui'
 import { fmtCredit, fmtMs, fmtTok } from '../format'
+import { Eraser, PenLine, RefreshCw } from 'lucide-react'
 
 /** 数值格式化：大数用千分位，小数保留位数。 */
 function fmtRate(v: number): string {
@@ -130,7 +131,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
             自动刷新（10s）
           </label>
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 刷新
+            {loading ? <Spinner /> : <RefreshCw size={13} strokeWidth={1.9} />} 刷新
           </button>
           <button
             className="btn btn-danger"
@@ -138,7 +139,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
             disabled={resetting || session.read_only}
             title={session.read_only ? '只读模式' : '清空累计统计，便于观察之后的增量'}
           >
-            {resetting ? <Spinner /> : '🧹'} 重置统计
+            {resetting ? <Spinner /> : <Eraser size={13} strokeWidth={1.9} />} 重置统计
           </button>
         </div>
       </div>
@@ -228,7 +229,7 @@ export default function StatsPage({ session }: { session: SessionInfo }) {
                       : '添加或修改模型单价'
                 }
               >
-                ✏️ 编辑价格
+                <PenLine size={13} strokeWidth={1.9} /> 编辑价格
               </button>
             </div>
           </div>

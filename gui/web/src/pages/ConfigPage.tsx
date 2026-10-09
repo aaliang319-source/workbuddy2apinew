@@ -6,6 +6,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, ApiError } from '../api'
 import type { ConfigMeta, SessionInfo } from '../types'
 import { Alert, ConfirmDialog, fmtISO, Spinner } from '../ui'
+import { Mail, RefreshCw, Save, Undo2 } from 'lucide-react'
 
 type Doc = Record<string, unknown>
 
@@ -234,7 +235,8 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
         </div>
         <div className="page-actions">
           <button className="btn" onClick={() => void load()} disabled={loading}>
-            {loading ? <Spinner /> : '🔄'} 重新读取
+            {loading ? <Spinner /> : <RefreshCw size={13} strokeWidth={1.9} />}
+              重新读取
           </button>
           {meta?.backup_path && (
             <button
@@ -243,7 +245,7 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
               disabled={writeDisabled || !session.dangerous_ops}
               title={!session.dangerous_ops ? '需在服务端开启 dangerous_ops' : '从首次备份恢复'}
             >
-              ↩️ 恢复备份
+              <Undo2 size={13} strokeWidth={1.9} /> 恢复备份
             </button>
           )}
         </div>
@@ -391,6 +393,36 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
                   </label>
                 </div>
               ))}
+            </div>
+            <div className="row" style={{ flexWrap: 'wrap' }}>
+              <div className="field" style={{ flex: '1 1 240px' }}>
+                <label>抖动跨度 jitter_minutes</label>
+                <input
+                  type="number"
+                  value={numText(getPath(doc, 'schedule.jitter_minutes'))}
+                  onChange={(e) => update('schedule.jitter_minutes', numOrUndefined(e.target.value) ?? 0)}
+                  placeholder="55"
+                />
+                <div className="desc">
+                  实际执行时刻 = 所配小时 + 每次排定时现掷的随机偏移（1 秒 – 本值分钟）。
+                  整点永不被选中，同一天的落点也不固定。留空 = 默认 55；上限 55
+                  （再大就会跨出所配小时，夜猫任务还会顶出 23:00-08:00 窗口）。
+                </div>
+              </div>
+              <div className="field" style={{ flex: '1 1 240px' }}>
+                <label className="checkbox">
+                  <input
+                    type="checkbox"
+                    checked={bool('schedule.jitter_disabled')}
+                    onChange={(e) => update('schedule.jitter_disabled', e.target.checked)}
+                  />
+                  准点执行 jitter_disabled
+                </label>
+                <div className="desc">
+                  勾选后按整点触发（抖动归 0）。仅用于排障需要精确时刻的场景——
+                  整点是自动化脚本最容易关联的共同指纹，长期开着的任务不建议勾。
+                </div>
+              </div>
             </div>
             <div className="row">
               <div className="field" style={{ flex: 1 }}>
@@ -704,7 +736,8 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
                     onClick={() => void sendNotifyTest()}
                     title="用当前磁盘上的配置发送一封测试邮件（需先保存并重启网关）"
                   >
-                    {testingNotify ? <Spinner /> : '📧'} 发送测试邮件
+                    {testingNotify ? <Spinner /> : <Mail size={13} strokeWidth={1.9} />}
+                    发送测试邮件
                   </button>
                   {notifyTestMsg && <span className={notifyTestOK ? 'text-ok' : 'text-danger'}>{notifyTestMsg}</span>}
                 </div>
@@ -717,7 +750,8 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
 
           <div className="page-actions">
             <button className="btn btn-primary" onClick={() => void saveForm()} disabled={saving || writeDisabled}>
-              {saving ? <Spinner /> : '💾'} 保存配置
+              {saving ? <Spinner /> : <Save size={13} strokeWidth={1.9} />}
+              保存配置
             </button>
             <button className="btn" onClick={() => void load()} disabled={saving}>
               放弃修改
@@ -745,7 +779,8 @@ export default function ConfigPage({ session }: { session: SessionInfo }) {
           />
           <div className="page-actions" style={{ marginTop: 13 }}>
             <button className="btn btn-primary" onClick={() => void saveJSON()} disabled={saving || writeDisabled}>
-              {saving ? <Spinner /> : '💾'} 保存配置
+              {saving ? <Spinner /> : <Save size={13} strokeWidth={1.9} />}
+              保存配置
             </button>
             <button className="btn" onClick={() => setJsonText(JSON.stringify(doc ?? {}, null, 2))}>
               还原为已加载内容

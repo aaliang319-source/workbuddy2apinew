@@ -509,7 +509,12 @@ export interface AutomationKindStatus {
   kind: string
   enabled: boolean
   hours: number[] | null
+  /** 定时循环**最近一次排定时掷出的**触发时刻。
+   *  缺失 = 循环还没排定过（启动瞬间 / 刚启用 / 刚热更新），显示「待排定」。
+   *  注意不要在前端重算：抖动是每次现掷的随机数，重算就是另掷一次，显示的与真实执行不符。 */
   next_fire?: string | null
+  /** 抖动跨度（分钟，0 = 准点执行）：触发时刻落在所配小时的第 0 分钟 + (0, 跨度] 内。 */
+  jitter_minutes?: number
   running: boolean
   current_run_id?: string
   last_run?: AutomationRun | null

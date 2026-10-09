@@ -30,6 +30,12 @@ const KIND_DESC: Record<string, string> = {
   cat: '夜猫子脚本：23:00–08:00 窗口内补 1 次上报（窗口外自动跳过）',
 }
 
+// hoursHint 小时输入框的说明。抖动是**每次排定现掷**的随机偏移，所以写的是
+// "窗口内随机取一刻"而不是某个固定区间——用户配的是小时，不是分钟。
+const hoursHint =
+  '小时窗口（0-23，逗号分隔）。实际执行时刻 = 所配小时 + 每次排定时现掷的随机偏移（0-55 分钟内），' +
+  '整点永远不会被选中，同一天的落点也不固定。'
+
 // 脚本类任务有真实写副作用（领取/抽奖），手动执行前必须确认。
 const SCRIPT_KINDS = new Set(['school', 'cat'])
 
@@ -169,6 +175,16 @@ export default function Automation({ session }: { session: SessionInfo }) {
 
   return (
     <>
+      <div className="page-head">
+        <div className="page-head-left">
+          <h1>定时自动化</h1>
+          <p>
+            六类任务由网关定时执行，结果持久化在网关 data/automation.json（重启不丢）
+            {status?.enabled ? ' · 定时循环运行中' : ' · 定时循环已关闭（手动触发仍可用）'}
+          </p>
+        </div>
+      </div>
+
       {error && (
         <Alert kind="error" onClose={() => setError(null)}>
           {error}
@@ -182,14 +198,11 @@ export default function Automation({ session }: { session: SessionInfo }) {
 
       <div className="card">
         <div className="card-head">
-          <h2>定时自动化</h2>
-          <span className="hint">
-            {status?.enabled ? '定时循环运行中' : '定时循环已关闭（手动触发仍可用）'} · 保存即热生效
-          </span>
+          <h2>排程</h2>
+          <span className="hint">保存排程 = 写入 config.json + 立即热生效</span>
         </div>
-        <p className="text-dim" style={{ marginTop: 0, fontSize: 13 }}>
-          六类任务由网关定时执行，结果持久化在网关 <span className="mono">data/automation.json</span>（重启不丢）。
-          保存排程 = 写入网关 config.json + 立即热生效，无需重启。手动触发与定时共用同一执行器（同类型互斥）。
+        <p className="text-dim" style={{ marginTop: 0, fontSize: 12.5 }}>
+          手动触发与定时共用同一执行器（同类型互斥）。
         </p>
         <div className="row" style={{ flexWrap: 'wrap' }}>
           {(status?.kinds ?? []).map((k) => (
@@ -407,15 +420,19 @@ function KindCard({
             disabled={!writable}
             onChange={(e) => onChange({ hours: e.target.value })}
             placeholder="9, 21"
+            title={hoursHint}
           />
         </div>
       </div>
       <p className="desc" style={{ marginTop: 6 }}>
         下次执行：
-        {st.enabled && st.next_fire ? (
+        {!st.enabled ? (
+          <span className="text-dim">—（未启用）</span>
+        ) : st.next_fire ? (
           <span className="mono">{fmtISO(st.next_fire)}</span>
         ) : (
-          <span className="text-dim">—（未启用）</span>
+          // 循环还没排定过：不编造时刻，也不在前端重算（重算就是另掷一次随机数）。
+          <span className="text-dim">待排定</span>
         )}
         {dirty && <span className="text-danger"> · 有未保存修改</span>}
         {st.last_run && (

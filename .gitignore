@@ -6,6 +6,7 @@ data/
 *.env
 .env
 .env.*
+!.env.example
 
 # Binaries (anchored to repo root only — bare "login"/"credit" would also ignore cmd/login/, cmd/credit/)
 /login
@@ -19,6 +20,13 @@ config.json
 # Build artifacts
 *.tmp
 __pycache__/
+
+# Go 模块缓存（docker 内跑测试用，非源码）
+.gomodcache/
+
+# 浏览器截图会话 / 临时脚本（截图用，不入库）
+.playwright-mcp/
+.tmp-*.js
 
 # Backups (contains auth tokens)
 backups/

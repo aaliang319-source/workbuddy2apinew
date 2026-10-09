@@ -2,7 +2,8 @@
 import { useState } from 'react'
 import { api, ApiError } from '../api'
 import type { SessionInfo } from '../types'
-import { Alert, Spinner } from '../ui'
+import { Alert, BrandMark, Spinner } from '../ui'
+import { Info } from 'lucide-react'
 
 export default function Login({
   info,
@@ -36,9 +37,10 @@ export default function Login({
 
   return (
     <div className="login-wrap">
+      <div className="login-glow" />
       <div className="login-card">
-        <div className="login-logo">WB</div>
-        <h1>WorkBuddy 控制台</h1>
+        <BrandMark size={44} />
+        <h1>WorkBuddy</h1>
         <div className="sub">workbuddy2api 网关管理面板</div>
 
         {banner && <Alert kind="warn" onClose={onCloseBanner}>{banner}</Alert>}
@@ -79,7 +81,9 @@ export default function Login({
 
         {info?.using_default_password && (
           <div className="alert alert-info" style={{ marginTop: 16, marginBottom: 0, fontSize: 12.5 }}>
-            <span className="alert-icon">ℹ️</span>
+            <span className="alert-icon">
+              <Info size={14} strokeWidth={1.9} />
+            </span>
             <div>
               当前使用默认口令 <span className="mono">admin / workbuddy</span>。首次登录后请修改：在服务端配置文件中设置
               <span className="mono"> ui.username / ui.password</span>，或设置环境变量

@@ -1,9 +1,26 @@
-// App.tsx 应用外壳：登录门禁 + 侧边导航 + 路由。
+// App.tsx 应用外壳：登录门禁 + 左侧导航 + 路由。
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
+import {
+  Activity,
+  ChartColumn,
+  KeyRound,
+  LayoutDashboard,
+  LogOut,
+  MessageSquare,
+  Moon,
+  RefreshCw,
+  ScrollText,
+  Settings,
+  Sun,
+  UserPlus,
+  Users,
+  type LucideIcon,
+} from 'lucide-react'
 import { api, setUnauthorizedHandler } from './api'
 import type { SessionInfo } from './types'
-import { Alert, Spinner } from './ui'
+import { Alert, BrandMark, Spinner } from './ui'
+import { useTheme, type Theme } from './theme'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import StatsPage from './pages/StatsPage'
@@ -16,17 +33,19 @@ import System from './pages/System'
 import Keys from './pages/Keys'
 import Automation from './pages/Automation'
 
-const NAV = [
-  { to: '/', label: '仪表盘', icon: '📊', end: true },
-  { to: '/accounts', label: '账号管理', icon: '👥' },
-  { to: '/keys', label: 'API Keys', icon: '🔑' },
-  { to: '/stats', label: '请求统计', icon: '📈' },
-  { to: '/automation', label: '自动化', icon: '🤖' },
-  { to: '/requests', label: '请求明细', icon: '🧾' },
-  { to: '/login', label: '添加账号', icon: '➕' },
-  { to: '/playground', label: '聊天测试', icon: '💬' },
-  { to: '/config', label: '网关配置', icon: '⚙️' },
-  { to: '/system', label: '系统', icon: '🔧' },
+type NavItem = { to: string; label: string; icon: LucideIcon; end?: boolean }
+
+const NAV: NavItem[] = [
+  { to: '/', label: '仪表盘', icon: LayoutDashboard, end: true },
+  { to: '/accounts', label: '账号管理', icon: Users },
+  { to: '/keys', label: 'API Keys', icon: KeyRound },
+  { to: '/stats', label: '请求统计', icon: ChartColumn },
+  { to: '/requests', label: '请求明细', icon: ScrollText },
+  { to: '/automation', label: '自动化', icon: RefreshCw },
+  { to: '/login', label: '添加账号', icon: UserPlus },
+  { to: '/playground', label: '聊天测试', icon: MessageSquare },
+  { to: '/config', label: '网关配置', icon: Settings },
+  { to: '/system', label: '系统', icon: Activity },
 ]
 
 export default function App() {
@@ -34,6 +53,7 @@ export default function App() {
   const [loading, setLoading] = useState(true)
   const [banner, setBanner] = useState<string | null>(null)
   const navigate = useNavigate()
+  const [theme, toggleTheme] = useTheme()
 
   const refreshSession = useCallback(async () => {
     try {
@@ -70,6 +90,7 @@ export default function App() {
   if (loading) {
     return (
       <div className="login-wrap">
+        <div className="login-glow" />
         <Spinner label="正在连接服务…" />
       </div>
     )
@@ -80,16 +101,26 @@ export default function App() {
   }
 
   return (
-    <Shell session={session} onLogout={handleLoggedOut} onSessionRefresh={refreshSession} />
+    <Shell
+      session={session}
+      theme={theme}
+      onToggleTheme={toggleTheme}
+      onLogout={handleLoggedOut}
+      onSessionRefresh={refreshSession}
+    />
   )
 }
 
 function Shell({
   session,
+  theme,
+  onToggleTheme,
   onLogout,
   onSessionRefresh,
 }: {
   session: SessionInfo
+  theme: Theme
+  onToggleTheme: () => void
   onLogout: () => void
   onSessionRefresh: () => Promise<SessionInfo | null>
 }) {
@@ -104,47 +135,66 @@ function Shell({
     return list
   }, [session])
 
+  const ThemeIcon = theme === 'dark' ? Moon : Sun
+
   return (
     <div className="app">
-      <aside className="sidebar">
+      <aside className="rail">
         <div className="brand">
-          <div className="brand-dot">WB</div>
+          <BrandMark size={28} />
           <div className="brand-text">
-            <strong>WorkBuddy2APInew 控制台</strong>
-            <span>workbuddy2api 网关</span>
+            <strong>WorkBuddy</strong>
+            <span>2APInew 控制台</span>
           </div>
         </div>
-        {NAV.map((item) => (
-          <NavLink
-            key={item.to}
-            to={item.to}
-            end={item.end}
-            className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
-          >
-            <span className="nav-icon">{item.icon}</span>
-            {item.label}
-          </NavLink>
-        ))}
+
+        {NAV.map((item) => {
+          const Icon = item.icon
+          return (
+            <NavLink
+              key={item.to}
+              to={item.to}
+              end={item.end}
+              className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}
+            >
+              <span className="nav-icon">
+                <Icon size={15} strokeWidth={1.75} />
+              </span>
+              <span className="nav-label">{item.label}</span>
+            </NavLink>
+          )
+        })}
+
         <div className="nav-spacer" />
+
         <div className="nav-foot">
-          <div style={{ marginBottom: 8, wordBreak: 'break-all' }}>网关：{session.gateway_url}</div>
-          <div style={{ marginBottom: 8 }}>
-            <span className="text-faint">登录身份：</span>
-            {session.username}
-            {session.read_only && <span className="badge badge-warn" style={{ marginLeft: 6 }}>只读</span>}
+          <div className="who">
+            <LogOut size={12} strokeWidth={1.75} style={{ flex: '0 0 auto' }} />
+            <span className="mono">{(session.username || '—') + (session.read_only ? ' · 只读' : '')}</span>
           </div>
           <button className="btn btn-sm" style={{ width: '100%' }} onClick={onLogout}>
             退出登录
           </button>
         </div>
+
+        <button className="nav-item theme-toggle" onClick={onToggleTheme}>
+          <span className="nav-icon">
+            <ThemeIcon size={15} strokeWidth={1.75} />
+          </span>
+          <span className="nav-label">主题 · {theme === 'dark' ? '暗色' : '明色'}</span>
+        </button>
       </aside>
 
       <main className="main">
-        {warnings.map((w) => (
-          <Alert key={w} kind="warn">
-            {w}
-          </Alert>
-        ))}
+        {warnings.length > 0 && (
+          <div className="shell-alerts">
+            {warnings.map((w) => (
+              <Alert key={w} kind="warn">
+                {w}
+              </Alert>
+            ))}
+          </div>
+        )}
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/accounts" element={<Accounts session={session} />} />

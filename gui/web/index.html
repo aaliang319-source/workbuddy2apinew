@@ -1,10 +1,33 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
     <title>WorkBuddy2APInew 控制台</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="alternate icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <script>
+      // 首屏前定主题，避免明色用户看到一帧暗色。字体与后端都不可用时也不阻塞。
+      ;(function () {
+        try {
+          var t = localStorage.getItem('wb2api.theme')
+          if (t !== 'dark' && t !== 'light') {
+            t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+          }
+          document.documentElement.dataset.theme = t
+          document.documentElement.style.colorScheme = t
+          // 地址栏/标题栏配色跟随主题底色，避免明色用户的标签页仍是深色块。
+          var m = document.createElement('meta')
+          m.name = 'theme-color'
+          m.content = t === 'light' ? '#eef1f6' : '#0a0c11'
+          document.head.appendChild(m)
+        } catch (e) {
+          /* localStorage 被禁用时保持默认暗色 */
+        }
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

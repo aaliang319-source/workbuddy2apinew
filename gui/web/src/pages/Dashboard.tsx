@@ -16,27 +16,35 @@ export default function Dashboard() {
   const [usageRange, setUsageRange] = useState<UsageRange>('today')
   const [detail, setDetail] = useState<AccountUsage | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [statsError, setStatsError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null)
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true)
     try {
-      const [o, a, st] = await Promise.all([api.overview(), api.accounts(), api.stats().catch(() => null)])
+      // 主数据（健康度/账号）与统计分开请求：任一侧失败不拖累另一侧。
+      // 此前三者同在一个 Promise.all 且 stats 用 catch(()=>null) 吞错——stats 一失败
+      // 就静默把积分卡冻结在旧值（而其余部分照常刷新），失败还被完全隐藏。
+      const [o, a] = await Promise.all([api.overview(), api.accounts()])
       setOv(o)
       setAccounts(a.accounts ?? [])
-      // 统计端点失败（网关旧版/统计关闭）不阻塞仪表盘其余部分。
-      if (st) {
-        setUsage(st.stats.usage ?? null)
-        setAccountCosts((st as { account_costs?: Record<string, number> }).account_costs ?? {})
-        setStatsEnabled(st.stats.enabled)
-      }
       setError(null)
       setRefreshedAt(new Date())
     } catch (err) {
       setError(err instanceof ApiError ? err.message : '加载失败')
     } finally {
       setLoading(false)
+    }
+    // 统计端点单独取：失败时保留上一次的 usage（不清空），并置 statsError 显式提示。
+    try {
+      const st = await api.stats()
+      setUsage(st.stats.usage ?? null)
+      setAccountCosts((st as { account_costs?: Record<string, number> }).account_costs ?? {})
+      setStatsEnabled(st.stats.enabled)
+      setStatsError(null)
+    } catch (err) {
+      setStatsError(err instanceof ApiError ? err.message : '统计加载失败')
     }
   }, [])
 
@@ -166,6 +174,7 @@ export default function Dashboard() {
           <UsageCard
             usage={usage}
             statsEnabled={statsEnabled}
+            statsError={statsError}
             range={usageRange}
             onRange={setUsageRange}
             onOpenDetail={setDetail}
@@ -355,12 +364,14 @@ function fmtCredit(v: number): string {
 function UsageCard({
   usage,
   statsEnabled,
+  statsError,
   range,
   onRange,
   onOpenDetail,
 }: {
   usage: UsageSnapshot | null
   statsEnabled: boolean
+  statsError: string | null
   range: UsageRange
   onRange: (r: UsageRange) => void
   onOpenDetail: (u: AccountUsage) => void
@@ -395,7 +406,12 @@ function UsageCard({
     <div className="card" style={{ marginBottom: 16 }}>
       <div className="card-head">
         <h2>积分消耗</h2>
-        <div style={{ display: 'flex', gap: 4 }}>
+        <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+          {statsError && (
+            <span className="text-warn" style={{ fontSize: 11, marginRight: 6 }} title={statsError}>
+              统计更新失败，显示上次数据
+            </span>
+          )}
           {(
             [
               ['today', '今天'],

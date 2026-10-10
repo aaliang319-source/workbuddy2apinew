@@ -734,6 +734,8 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		chatMeta.ConversationRequestID = session.TurnRequestID(turnKey)
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
+	// 思考档位回填目标：ChatStreamContext 出站前把实际档位写进 st.thinkEffort（进明细）。
+	chatMeta.EffortOut = &st.thinkEffort
 
 	// Key 关联范围：多 Key 模式下选号限定在该 Key 关联（且启用）的账号子集内，
 	// 并按关联优先级分层（PickForKey：先耗尽最高层再降层）；nil = 旧单 Key 模式全池。

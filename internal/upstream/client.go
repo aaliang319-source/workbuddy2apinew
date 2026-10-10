@@ -955,6 +955,13 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}
+	// 回填「实际发往上游的思考档位」（注入 + 降级后的最终值）供请求明细展示。
+	// 在 prepareBody 之后、任何出站之前读，每次尝试都覆盖前值：换号重试同值（档位由
+	// 模型能力桶决定，不随账号变），但模型级故障转移到别的模型后会更新为新模型的档位
+	// ——故最终值 = 最后一次出站尝试的档位。
+	if meta.EffortOut != nil {
+		*meta.EffortOut = ReadEffort(prepared)
+	}
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 + 尾部
 	// 不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。

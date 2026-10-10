@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"workbuddy2api/internal/upstream"
 )
 
 // chatSeq 进程级请求序号。
@@ -50,6 +52,11 @@ type chatStat struct {
 	tries     int    // 轮转尝试次数（真正出站的尝试，Acquire 竞态失败不计）
 	respModel string // 上游响应回传的实际模型（auto 档可见真实路由；失败尝试为空）
 	reqModel  string // 原始请求模型名（客户端发来的名字；改路由/回退不覆盖——溯源用）
+	// 思考档位（进明细「思考等级」列）：reqEffort 客户端请求的档位（入站原始体解析，
+	// anthropic 协议通常为空）；thinkEffort 实际发往上游的档位（出站体注入+降级后，
+	// 由 ChatMeta.EffortOut 回填，末次尝试为准）。
+	reqEffort   string
+	thinkEffort string
 
 	logged bool
 }
@@ -60,7 +67,9 @@ func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), reqModel: parseModelFromBody(body), mode: mode, toks: -1}
+	// reqEffort：客户端请求的思考档位（入站体解析；anthropic 路径 body 已是翻译后形态，
+	// 有则该值、无则为空）。实际出站档位 thinkEffort 由 handler 侧 ChatMeta.EffortOut 回填。
+	return &chatStat{start: now, model: parseModelFromBody(body), reqModel: parseModelFromBody(body), reqEffort: upstream.ReadEffort(body), mode: mode, toks: -1}
 }
 
 // done 幂等落一行表格日志。

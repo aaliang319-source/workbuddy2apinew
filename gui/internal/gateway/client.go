@@ -481,6 +481,9 @@ type RequestRecord struct {
 	RespModel string `json:"resp_model,omitempty"`
 	// ReqModel 原始请求模型名（客户端发来的名字）。
 	ReqModel string `json:"req_model,omitempty"`
+	// ThinkEffort 实际发往上游的思考档位；ReqEffort 客户端请求的档位（请求→实际改写）。
+	ThinkEffort string `json:"think_effort,omitempty"`
+	ReqEffort   string `json:"req_effort,omitempty"`
 }
 
 // Stats 拉取按模型聚合的请求统计。

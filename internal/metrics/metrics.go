@@ -43,6 +43,11 @@ type Observe struct {
 	RespModel string
 	// ReqModel 原始请求模型名（客户端发来的名字；与最终服务模型可能不同）。
 	ReqModel string
+	// ThinkEffort 实际发往上游的思考档位（prepareBody 注入 + 降级后的 reasoning_effort）；
+	// ReqEffort 客户端请求的档位（入站原始体，anthropic 协议通常为空——它发 thinking
+	// budget 而非档位）。二者共同支撑明细「思考等级」列展示「请求→实际」的改写；均缺失为空串。
+	ThinkEffort string
+	ReqEffort   string
 }
 
 // ModelAccum 单模型累计量（落盘形态，只存和与计数；派生值在 Snapshot 时算）。
@@ -127,6 +132,9 @@ type RequestRecord struct {
 	RespModel string `json:"resp_model,omitempty"`
 	// ReqModel 原始请求模型名（客户端发来的名字；旧记录缺失）。
 	ReqModel string `json:"req_model,omitempty"`
+	// ThinkEffort 实际发往上游的思考档位；ReqEffort 客户端请求的档位（旧记录缺失）。
+	ThinkEffort string `json:"think_effort,omitempty"`
+	ReqEffort   string `json:"req_effort,omitempty"`
 }
 
 // Stats /v1/stats 响应体（对应面板 client.go Stats）。Models 空时为 [] 非 nil

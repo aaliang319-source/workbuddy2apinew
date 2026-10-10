@@ -327,6 +327,10 @@ export interface RequestRecord {
   resp_model?: string
   /** 原始请求模型名（客户端发来的名字；旧记录缺失） */
   req_model?: string
+  /** 实际发往上游的思考档位（注入+降级后）；旧记录缺失 */
+  think_effort?: string
+  /** 客户端请求的思考档位（anthropic 协议通常缺失）；旧记录缺失 */
+  req_effort?: string
 }
 
 /** 网关 /v1/stats 响应。 */

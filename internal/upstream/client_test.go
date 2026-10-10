@@ -412,6 +412,44 @@ func TestFetchModelsEffortsDriveBodyDowngrade(t *testing.T) {
 	}
 }
 
+// TestChatStreamEffortOutReflectsOutbound 出参 EffortOut 必须回填「实际发往上游」的
+// 思考档位（注入 + 降级后的值），而不是客户端请求的原始值。请求 max、模型只支持
+// low/high → 出参应是降级后的 "high"。
+func TestChatStreamEffortOutReflectsOutbound(t *testing.T) {
+	c := testClient(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/console/enterprises/personal/models"):
+			return jsonResp(200, `{"code":0,"data":{"models":[
+				{"id":"glm-5.2","name":"GLM-5.2","maxInputTokens":131072,"maxOutputTokens":8192,"reasoning":{"effort":"high","supportedEfforts":["low","high"]}}
+			],"agents":[{"name":"cli","models":["glm-5.2"]}]}}`), nil
+		default:
+			return &http.Response{
+				StatusCode: 200,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader("data: [DONE]\n\n")),
+			}, nil
+		}
+	})
+	a := &auth.Auth{AccessToken: "at", UID: "u1"}
+	if _, err := c.FetchModels(a); err != nil {
+		t.Fatalf("fetch models: %v", err)
+	}
+	var got string
+	rc, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","reasoning_effort":"max","messages":[]}`), "",
+		ChatMeta{EffortOut: &got})
+	if err != nil || status != 200 {
+		t.Fatalf("chat: status=%d err=%v", status, err)
+	}
+	rc.Close()
+	if got != "high" {
+		t.Errorf("EffortOut=%q want high（降级后的出站档位）", got)
+	}
+	// 未挂出参（nil）时不得 panic——既有调用点全部走这条路径。
+	if _, status, _, err := c.ChatStream(a, []byte(`{"model":"glm-5.2","reasoning_effort":"max","messages":[]}`), "", ChatMeta{}); err != nil || status != 200 {
+		t.Fatalf("nil EffortOut: status=%d err=%v", status, err)
+	}
+}
+
 func TestChatStreamHardCreditError(t *testing.T) {
 	c := testClient(func(r *http.Request) (*http.Response, error) {
 		return jsonResp(402, `{"code":1,"msg":"余额不足"}`), nil

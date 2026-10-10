@@ -253,6 +253,7 @@ export default function Requests({ session: _session }: { session: SessionInfo }
                 <tr>
                   <th>时间</th>
                   <th>模型</th>
+                  <th>思考等级</th>
                   <th className="num">状态</th>
                   <th>账号</th>
                   <th>Key</th>
@@ -290,6 +291,19 @@ export default function Requests({ session: _session }: { session: SessionInfo }
                         <span className="text-dim" style={{ fontSize: 11 }}> → {r.resp_model}</span>
                       )}
                     </td>
+                        <td className="mono text-dim">
+                          {(() => {
+                            // 「请求 → 实际」：客户端请求档位与出站档位不同（被网关改写）时才显示箭头。
+                            if (r.req_effort && r.think_effort && r.req_effort !== r.think_effort) {
+                              return (
+                                <span title={`客户端请求 ${r.req_effort}，实际出站 ${r.think_effort}`}>
+                                  {r.req_effort} <span className="text-warn">→</span> {r.think_effort}
+                                </span>
+                              )
+                            }
+                            return r.think_effort || r.req_effort || '—'
+                          })()}
+                        </td>
                         <td className="num">
                           <span className={statusTone(r.status)}>{r.status}</span>
                         </td>
@@ -331,12 +345,19 @@ export default function Requests({ session: _session }: { session: SessionInfo }
                       </tr>
                       {isOpen && (
                         <tr key={`${exKey}-detail`} onClick={(e) => e.stopPropagation()}>
-                          <td colSpan={15} style={{ background: 'rgba(127,127,127,0.06)' }}>
+                          <td colSpan={16} style={{ background: 'rgba(127,127,127,0.06)' }}>
                             <dl className="kv" style={{ margin: '2px 0' }}>
                               <dt>完整时间</dt>
                               <dd className="mono">{fmtFull(r.time)}</dd>
                               <dt>协议</dt>
                               <dd>{r.proto || '—'}</dd>
+                              <dt>思考等级</dt>
+                              <dd className="mono">
+                                请求 {r.req_effort || '—'} → 实际 {r.think_effort || '—'}
+                                {r.req_effort && r.think_effort && r.req_effort !== r.think_effort && (
+                                  <span className="text-warn">（网关已改写）</span>
+                                )}
+                              </dd>
                               <dt>Key</dt>
                               <dd className="mono">{r.key_name || '—'}</dd>
                               <dt>尝试</dt>
@@ -403,6 +424,13 @@ export default function Requests({ session: _session }: { session: SessionInfo }
           <dd>该请求命中的业务 API Key 名——排查"为什么走了某个账号"时先看这一列（不同 Key 的关联与优先级不同）。</dd>
           <dt>尝试</dt>
           <dd>轮转尝试次数：1 = 一次选中即成功；大于 1 表示中途换过号（限流/失效/余额不足），换号原因见「错误」列。</dd>
+          <dt>思考等级</dt>
+          <dd>
+            实际发往上游的 reasoning effort 档位（off / minimal / low / medium / high / xhigh / max）。
+            客户端请求的档位与该模型支持的档位不一致时，网关会改写（如不支持 medium 降到 low），
+            此时显示「请求 → 实际」（箭头主色标注）；一致或无请求档位（Anthropic 协议发思考预算而非档位，
+            由网关补模型默认档）时只显示实际值。
+          </dd>
           <dt>缓存命中</dt>
           <dd>命中 / 未命中的输入 token 数。命中部分计费远低于未命中，直接影响花费。</dd>
           <dt>扣费</dt>

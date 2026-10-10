@@ -183,6 +183,8 @@ func (h *Handler) messages(w http.ResponseWriter, r *http.Request) {
 		chatMeta.ConversationRequestID = session.TurnRequestID(turnKey)
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
+	// 思考档位回填目标：出站前写入实际档位（进明细「思考等级」列）。
+	chatMeta.EffortOut = &st.thinkEffort
 
 	// 响应级 Request-Id（Anthropic 客户端/SDK 习惯读该头做日志关联）。
 	reqID := "req_" + randomHex8()

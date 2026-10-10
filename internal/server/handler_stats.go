@@ -40,6 +40,8 @@ func (h *Handler) observeMetrics(st *chatStat, model string, stream bool) {
 		Tries:            st.tries,
 		RespModel:        st.respModel,
 		ReqModel:         st.reqModel,
+		ThinkEffort:      st.thinkEffort,
+		ReqEffort:        st.reqEffort,
 		Now:              time.Now(),
 	})
 }

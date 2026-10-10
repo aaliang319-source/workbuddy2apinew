@@ -110,6 +110,8 @@ func (t *Tracker) appendRecent(o Observe) {
 		Tries:            o.Tries,
 		RespModel:        o.RespModel,
 		ReqModel:         o.ReqModel,
+		ThinkEffort:      o.ThinkEffort,
+		ReqEffort:        o.ReqEffort,
 	}
 	// Credit 只在显式观测时记录（缺失≠0 口径，与聚合的 CreditSum 一致）；
 	// 显式 0（免费层命中）对明细同样有意义，不滤零。

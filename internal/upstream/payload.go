@@ -77,6 +77,32 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	return out
 }
 
+// ReadEffort 从请求体读出思考档位字段（reasoning_effort / reasoningEffort，snake 优先）。
+//
+// 两个用途：
+//   - 出站体（prepareBody 产出后）→ 「实际发往上游的档位」（注入 + 降级最终值）：客户端
+//     发来的档位不等于最终出站档位——deepseek 系会被 injectThinking 注入/补默认档、
+//     被 normalizeReasoningEffort 降级，唯一准确的值是 prepareBody 产出体里的字段。
+//   - 入站体（客户端原始 body）→ 「客户端请求的档位」：与出站值对比即可看出网关改写了什么。
+//
+// 只读不校验（合法性由管线保证）；未携带 / 无法解析 / 空串返回 ""。
+func ReadEffort(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	var obj struct {
+		Snake string `json:"reasoning_effort"`
+		Camel string `json:"reasoningEffort"`
+	}
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return ""
+	}
+	if s := strings.TrimSpace(obj.Snake); s != "" {
+		return s
+	}
+	return strings.TrimSpace(obj.Camel)
+}
+
 // effortRank 档位从低到高。
 var effortRank = map[string]int{"off": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4, "xhigh": 5, "max": 6}
 

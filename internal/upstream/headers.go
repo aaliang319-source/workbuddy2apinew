@@ -210,6 +210,12 @@ type ChatMeta struct {
 	ConversationID        string // X-Conversation-ID：body 提取的入站值，空则不发（透传优先，不伪造）
 	ConversationRequestID string // X-Conversation-Request-ID / X-Root-Request-ID：聚合主键，必发
 	TraceID               string // X-Trace-ID：入站透传值，空则回落 conversationRequestID
+
+	// EffortOut 出参（可选）：非 nil 时，ChatStreamContext 在出站前回填「实际发往上游的
+	// 思考档位」（prepareBody 注入 + 降级管线跑完后的 reasoning_effort）。请求明细
+	// 「思考等级」列据此展示客户端请求档位→实际档位的改写。nil 则完全不回填（既有调用点
+	// 零改动；ChatHeaders 读不到也不感知）。并发安全：由调用方在单请求内串行读取。
+	EffortOut *string
 }
 
 // ChatHeaders 在 common 之上加 chat 专属的账号头。

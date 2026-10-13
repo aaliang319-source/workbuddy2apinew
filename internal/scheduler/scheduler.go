@@ -383,15 +383,23 @@ func (s *Scheduler) checkinAll(ctx context.Context) ([]CheckinOutcome, error) {
 				log.Printf("checkin %s: %v", logfmt.UID8(st.UID), err)
 			}
 		} else {
+			// 签到成功：清掉刷新阶段可能残留的告警（token 刷新失败但原 token 仍有效时
+			// 会写入 Detail）。不清的话详情页会出现「状态=成功、说明=refresh: xxx」
+			// 这种自相矛盾的行；刷新告警已由上面的 log.Printf 留痕。
 			oc.Status = CheckinOK
+			oc.Detail = ""
 		}
 		// 分桶查余额：快过期窗口内的积分单独标记，pool 优先消耗（issue:积分过期）。
 		// ExpiringSoonWindow<=0 时退化为纯总量（与引入前一致）。
 		remain, buckets, err := s.cfg.Upstream.UserResourceDetailed(a, s.cfg.ExpiringSoonWindow)
 		if err != nil {
 			log.Printf("user-resource %s: %v", logfmt.UID8(st.UID), err)
+			// Status 即将被改写成 fail，而 Detail 里可能还留着签到自己的结论
+			// （如"幂等成功"）。直接 append 会拼出「幂等成功 ... http 500」这种
+			// 自相矛盾的一行，详情页里分不清是签到挂了还是查余额挂了。
+			// 先把签到结论固化成独立短语，再接查余额错误，两步责任分明。
+			oc.Detail = joinDetail("签到: "+checkinOutcomeText(oc.Status, oc.Detail), "查余额失败: "+err.Error())
 			oc.Status = CheckinFail
-			oc.Detail = joinDetail(oc.Detail, "resource: "+err.Error())
 			failN++
 			out = append(out, oc)
 			continue
@@ -420,6 +428,29 @@ func joinDetail(existing, add string) string {
 		return add
 	}
 	return existing + "; " + add
+}
+
+// checkinOutcomeText 把签到自身的结论压成一句可读短语。
+//
+// 用于"签到之后又失败"的场景（典型是查余额 500）：此时 Status 会被改写成 fail，
+// 签到到底成没成功只能靠 Detail 交代。返回「成功」/「今日已签到（幂等）」/
+// 「失败（<原因>）」，让详情页每一行的状态与说明不再互相打架。
+func checkinOutcomeText(st CheckinStatus, detail string) string {
+	switch st {
+	case CheckinOK:
+		return "成功"
+	case CheckinAlready:
+		return "今日已签到（幂等）"
+	case CheckinFail:
+		if detail != "" {
+			return "失败（" + detail + "）"
+		}
+		return "失败"
+	}
+	if detail != "" {
+		return detail
+	}
+	return string(st)
 }
 
 // RunActivityNow 立即对池内所有可用账号执行对话活跃上报。

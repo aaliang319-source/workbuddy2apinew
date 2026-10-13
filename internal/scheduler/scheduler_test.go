@@ -572,6 +572,9 @@ type checkinStub struct {
 	refreshFail    bool   // /token/refresh 是否失败（返回 12153 session dead）
 	refreshCalls   atomic.Int32
 	resourceRemain int64
+	// resourceStatus /get-user-resource 的 HTTP 状态码（0=200）。非 0 时返回错误体，
+	// 用于验证"签到成功但查余额失败"这一类混合结果的文案（两步责任必须分明）。
+	resourceStatus int
 }
 
 func (s *checkinStub) server() *httptest.Server {
@@ -583,6 +586,11 @@ func (s *checkinStub) server() *httptest.Server {
 			}
 			w.Write([]byte(s.checkinBody))
 		case strings.HasSuffix(r.URL.Path, "/get-user-resource"):
+			if s.resourceStatus != 0 {
+				w.WriteHeader(s.resourceStatus)
+				w.Write([]byte(`{"code":10000,"msg":"API request failed with status code: 500"}`))
+				return
+			}
 			w.Write([]byte(`{"code":0,"data":{"Response":{"Data":{"Accounts":[{"CycleCapacitySize":100,"CycleCapacityRemain":` +
 				jsonI64(s.resourceRemain) + `,"CycleCapacityUsed":0}]}}}}`))
 		case strings.HasSuffix(r.URL.Path, "/token/refresh"):
@@ -665,6 +673,64 @@ func TestCheckinAllFail(t *testing.T) {
 	}
 	if out[0].Detail == "" {
 		t.Error("fail 应填 detail")
+	}
+}
+
+// TestCheckinAlreadyThenResourceFailKeepsOutcomeReadable 签到已签但查余额失败。
+//
+// 状态记 fail（余额没刷到），但说明必须把两步分开写：以前的实现是把余额错误
+// 直接 append 到"上游判定今日已签到（幂等成功）"后面，详情页里一行同时出现
+// 「幂等成功」和「http 500」，看的人分不清哪一步挂了。
+func TestCheckinAlreadyThenResourceFailKeepsOutcomeReadable(t *testing.T) {
+	s, _ := newCheckinS(t, &checkinStub{
+		checkinBody:    `{"code":14001,"msg":"今天已签到"}`,
+		resourceStatus: 500,
+	})
+	out, err := s.CheckinAll()
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if out[0].Status != CheckinFail {
+		t.Errorf("status=%q want fail（余额未刷到）", out[0].Status)
+	}
+	d := out[0].Detail
+	if !strings.Contains(d, "签到: 今日已签到（幂等）") {
+		t.Errorf("detail 应交代签到自身的结论，got=%q", d)
+	}
+	if !strings.Contains(d, "查余额失败") {
+		t.Errorf("detail 应点明失败发生在查余额，got=%q", d)
+	}
+	if strings.Contains(d, "幂等成功），无需重复; resource:") {
+		t.Errorf("旧的矛盾拼接文案不应再出现，got=%q", d)
+	}
+}
+
+// TestCheckinOKClearsRefreshWarning 刷新抖动失败但 token 未真过期、签到成功：
+// 状态 ok 时不得残留刷新阶段的告警，否则详情页会出现「成功 + refresh: xxx」的矛盾行。
+func TestCheckinOKClearsRefreshWarning(t *testing.T) {
+	stub := &checkinStub{
+		checkinBody:    `{"code":0,"msg":"ok","data":{}}`,
+		refreshFail:    true,
+		resourceRemain: 100,
+	}
+	srv := stub.server()
+	defer srv.Close()
+	p := pool.New("")
+	// token 5 分钟后过期（落在预刷新窗口内 → 触发刷新），但 NeedsRefresh(0) 仍 false。
+	a := &auth.Auth{UID: "u1", AccessToken: "at", RefreshToken: "rt",
+		ExpiresAt: time.Now().Add(5 * time.Minute).Unix()}
+	p.Add(a)
+	up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+	s := New(Config{Pool: p, Upstream: up})
+	out, _ := s.CheckinAll()
+	if out[0].Status != CheckinOK {
+		t.Fatalf("status=%q want ok（刷新抖动不应阻断签到）", out[0].Status)
+	}
+	if stub.refreshCalls.Load() != 1 {
+		t.Errorf("refresh calls=%d want 1", stub.refreshCalls.Load())
+	}
+	if out[0].Detail != "" {
+		t.Errorf("签到成功时不应残留刷新告警，got=%q", out[0].Detail)
 	}
 }
 

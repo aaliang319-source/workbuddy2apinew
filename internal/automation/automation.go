@@ -281,7 +281,7 @@ func (m *Manager) finish(run Run, kind scheduler.Kind, outs []scheduler.Outcome)
 		for _, c := range children {
 			items = append(items, Item{
 				UID: c.UID, Nickname: c.Nickname, OK: c.OK, Status: c.Status,
-				Message: c.Message, Reward: c.Reward, Credits: c.Credits,
+				Message: c.Message, Reward: c.Reward, Pending: c.Pending, Credits: c.Credits,
 			})
 		}
 	}
@@ -316,18 +316,22 @@ func (m *Manager) finish(run Run, kind scheduler.Kind, outs []scheduler.Outcome)
 	return run
 }
 
-// summarize 从 Items 派生运行级计数与列表摘要（Run 的 OK/Failed/Skipped/Accounts/Reason）。
+// summarize 从 Items 派生运行级计数与列表摘要（Run 的计数 / Accounts / Reward* / Reason）。
 //
 // 口径：账号类任务一条 Item = 一个账号；脚本类任务一条 Item = 一个账号的汇总结论
 // （见 scheduler.parseScriptOutput）。unreached（脚本没返回结果的账号）计入 Skipped——
 // 它确实是"没执行"，详情页里再按 unreached 单独标出，列表数字与账号数保持自洽。
 // Reason 供列表视图一眼看出"这次为什么不对"：失败 > 未执行 > 跳过的首个说明。
+// RewardTotal/RewardPendingTotal 滚动汇总收益：列表没有 Items，靠它们才能看出"这轮赚了多少"。
 func (m *Manager) summarize(run *Run) {
 	run.OK, run.Failed, run.Skipped, run.Accounts, run.Reason = 0, 0, 0, 0, ""
+	run.RewardTotal, run.RewardPendingTotal = 0, 0
 	for _, it := range run.Items {
 		if it.UID != "" {
 			run.Accounts++
 		}
+		run.RewardTotal += it.Reward
+		run.RewardPendingTotal += it.Pending
 		switch it.Status {
 		case scheduler.StatusSkipped, scheduler.StatusUnreached:
 			run.Skipped++

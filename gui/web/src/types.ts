@@ -487,7 +487,10 @@ export interface AutomationItem {
   /** unreached = 脚本没返回该账号任何结果（面板展示为「未执行」） */
   status: 'ok' | 'already' | 'fail' | 'skipped' | 'unreached' | string
   message?: string
+  /** 本次真正到账的积分（旅行=刚领奖，领养=+300） */
   reward?: number
+  /** 到站可领、尚未到账的积分（旅行派出当天就有值，次日领奖才转成 reward） */
+  reward_pending?: number
   credits?: number | null
 }
 
@@ -503,6 +506,10 @@ export interface AutomationRun {
   skipped: number
   /** 参与账号数（列表视图不含 items，用这个派生计数） */
   accounts?: number
+  /** 本次到账收益合计（列表摘要字段） */
+  reward_total?: number
+  /** 待领收益合计（列表摘要字段） */
+  reward_pending_total?: number
   /** 列表摘要：首个失败 / 未执行 / 跳过条目的说明 */
   reason?: string
   /** 脚本类任务：逐账号明细与脚本汇总行对不上时的提示（多为输出被截断） */

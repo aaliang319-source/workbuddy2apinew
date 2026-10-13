@@ -92,11 +92,108 @@ func billingAndGrowthServer(stub *travelStub) *httptest.Server {
 }
 
 // fastTravel 关闭账号间限速，避免测试白等 800ms。
+// fastTravel 关掉账号间限速（测试不真等 800ms）。
 func fastTravel(t *testing.T) {
 	t.Helper()
 	old := travelAccountDelay
 	travelAccountDelay = 0
 	t.Cleanup(func() { travelAccountDelay = old })
+}
+
+// TestTravelOutcomesCarryNicknameAndPendingReward 旅行结论必须带昵称与「到站待领」收益。
+//
+// 两个真实可读性问题（2026-09-27 用户反馈）：
+//  1. 详情页只显示 UID 前 8 位 —— 因为 travel 分支从没填过 Nickname（其它任务都填了）；
+//  2. 「只有一个账号有收益」—— 旅行一天一趟、派出后隔天才能领奖，所以任一轮里
+//     最多一个账号有 Reward（刚领到）。收益其实在**派出时**就由上游 `reward_credit`
+//     确定了，必须带出来（Pending），否则面板上看起来像其余账号白跑。
+func TestTravelOutcomesCarryNicknameAndPendingReward(t *testing.T) {
+	fastTravel(t)
+	cases := []struct {
+		name        string
+		state       string
+		wantStatus  string
+		wantReward  int64
+		wantPending int64
+	}{
+		{
+			name: "派出-收益待领", state: `{"state":"idle","daily_limit_reached":false,"reward_credit":12}`,
+			wantStatus: "ok", wantReward: 0, wantPending: 12,
+		},
+		{
+			name: "已达上限-收益待领", state: `{"state":"idle","daily_limit_reached":true,"reward_credit":12}`,
+			wantStatus: StatusSkipped, wantPending: 12,
+		},
+		{
+			name: "在途-收益待领", state: `{"state":"traveling","record_id":42,"reward_credit":15}`,
+			wantStatus: StatusSkipped, wantPending: 15,
+		},
+		{
+			name: "到站领奖-收益到账", state: `{"state":"arrived","record_id":42,"reward_credit":9}`,
+			wantStatus: "ok", wantReward: 9,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &travelStub{buddy: `{"id":7,"name":"档案喵 R"}`, state: tc.state}
+			srv := stub.server()
+			defer srv.Close()
+
+			p := pool.New("")
+			p.Add(&auth.Auth{
+				UID: "u1", Nickname: "傲天", AccessToken: "at",
+				RefreshToken: "rt", ExpiresAt: 9999999999,
+			})
+			up := &upstream.Client{HTTP: srv.Client(), ChatBaseCN: srv.URL, BillingBaseCN: srv.URL}
+			s := New(Config{Pool: p, Upstream: up})
+
+			out := s.RunTravelNow()
+			if len(out) != 1 {
+				t.Fatalf("out=%d want 1", len(out))
+			}
+			got := out[0]
+			if got.Nickname != "傲天" {
+				t.Errorf("Nickname=%q want 傲天（缺了面板只能显示 UID 前 8 位）", got.Nickname)
+			}
+			if got.Status != tc.wantStatus {
+				t.Errorf("Status=%q want %q", got.Status, tc.wantStatus)
+			}
+			if got.Reward != tc.wantReward {
+				t.Errorf("Reward=%d want %d", got.Reward, tc.wantReward)
+			}
+			if got.Pending != tc.wantPending {
+				t.Errorf("Pending=%d want %d（待领收益必须带出来）", got.Pending, tc.wantPending)
+			}
+		})
+	}
+}
+
+// TestTravelClaimWithoutRecordIDIsFail 到站却没有 record_id → 判 fail（不是 skipped）。
+//
+// 这是上游状态自相矛盾，混进"明确跳过"里就看不出来了。
+func TestTravelClaimWithoutRecordIDIsFail(t *testing.T) {
+	fastTravel(t)
+	stub := &travelStub{
+		buddy: `{"id":7,"name":"档案喵 R"}`,
+		state: `{"state":"arrived","record_id":0,"reward_credit":7}`,
+	}
+	srv := stub.server()
+	defer srv.Close()
+
+	s, _ := newTravelScheduler(t, srv, "u1")
+	out := s.RunTravelNow()
+	if len(out) != 1 {
+		t.Fatalf("out=%d want 1", len(out))
+	}
+	if out[0].Status != "fail" {
+		t.Errorf("Status=%q want fail（到站无 record_id 属上游自相矛盾）", out[0].Status)
+	}
+	if out[0].Pending != 7 {
+		t.Errorf("Pending=%d want 7（失败也要交代预期收益）", out[0].Pending)
+	}
+	if stub.claimCalls.Load() != 0 {
+		t.Errorf("claim calls=%d want 0（无 record_id 不该发领奖请求）", stub.claimCalls.Load())
+	}
 }
 
 // newTravelScheduler 构造 travel 相关依赖齐全的调度器。

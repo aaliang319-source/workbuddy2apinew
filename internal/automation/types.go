@@ -21,8 +21,13 @@ type Item struct {
 	OK       bool   `json:"ok"`
 	Status   string `json:"status"` // ok | already | fail | skipped | unreached（脚本未返回结果的账号）
 	Message  string `json:"message,omitempty"`
-	Reward   int64  `json:"reward,omitempty"`
-	Credits  *int64 `json:"credits,omitempty"`
+	// Reward 本次真正到账的积分（旅行=刚领奖，领养=+300）。
+	Reward int64 `json:"reward,omitempty"`
+	// Pending 到站可领、尚未到账的积分：旅行一天一趟、派出后隔天才能领奖，
+	// 所以任一轮里最多一个账号有 Reward，看起来像"只有一个人有收益"。
+	// 这个字段让"这一轮谁的收益是多少"在派出当天就可读。
+	Pending int64  `json:"reward_pending,omitempty"`
+	Credits *int64 `json:"credits,omitempty"`
 }
 
 // Run 一次任务执行的完整记录（落盘 + API 详情）。
@@ -39,6 +44,10 @@ type Run struct {
 	// Accounts 参与账号数（Items 里带 UID 的条数）；列表视图会剥掉 Items，
 	// 故单独留这个计数，让列表能显示"账号 N"而不是只看到 成功/失败/跳过。
 	Accounts int `json:"accounts,omitempty"`
+	// RewardTotal 本次到账收益合计；RewardPendingTotal 待领收益合计。
+	// 同上：列表没有 Items，滚动汇总字段才能让列表一眼看到"这轮赚了多少"。
+	RewardTotal        int64 `json:"reward_total,omitempty"`
+	RewardPendingTotal int64 `json:"reward_pending_total,omitempty"`
 	// Reason 列表摘要：首个失败 / 未执行 / 跳过条目的说明（详情页有完整明细）。
 	Reason string `json:"reason,omitempty"`
 	// ParseWarning 脚本类任务：逐账号明细与脚本自己的汇总行对不上时的提示

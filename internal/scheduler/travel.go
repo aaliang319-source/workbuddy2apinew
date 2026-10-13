@@ -132,12 +132,23 @@ func (s *Scheduler) runTravel(ctx context.Context) []Outcome {
 	return out
 }
 
+// pendingText 待领收益的说明后缀：0 表示上游尚未给出预定收益（派出当天常见），
+// 此时不拼「可领 0 积分」这种读起来像出错的文案。
+func pendingText(n int64) string {
+	if n <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("，到站可领 %d 积分", n)
+}
+
 // travelOne 单账号单趟状态机：查有无猫 + 查状态 + 最多一个动作，不轮询不等待。
+// 所有结论都带 Nickname：本轮巡检里失败/跳过的账号要靠昵称才看得懂是谁
+// （缺失时面板只剩 UID 前 8 位）。
 func (s *Scheduler) travelOne(a *auth.Auth) Outcome {
 	buddy, err := s.cfg.Upstream.BuddyInfo(a)
 	if err != nil {
 		log.Printf("travel %s: buddy-info: %v", logfmt.UID8(a.UID), err)
-		return Outcome{UID: a.UID, OK: false, Status: "fail", Message: "buddy-info: " + err.Error()}
+		return Outcome{UID: a.UID, Nickname: a.Nickname, OK: false, Status: "fail", Message: "buddy-info: " + err.Error()}
 	}
 	if buddy == nil {
 		return s.travelAdopt(a)
@@ -145,7 +156,7 @@ func (s *Scheduler) travelOne(a *auth.Auth) Outcome {
 	ts, err := s.cfg.Upstream.TravelStatus(a)
 	if err != nil {
 		log.Printf("travel %s: status: %v", logfmt.UID8(a.UID), err)
-		return Outcome{UID: a.UID, OK: false, Status: "fail", Message: "status: " + err.Error()}
+		return Outcome{UID: a.UID, Nickname: a.Nickname, OK: false, Status: "fail", Message: "status: " + err.Error()}
 	}
 	switch ts.State {
 	case travelStateArrived:
@@ -153,11 +164,15 @@ func (s *Scheduler) travelOne(a *auth.Auth) Outcome {
 	case travelStateIdle:
 		return s.travelDepart(a, ts)
 	case travelStateTraveling:
-		log.Printf("travel %s: skip (traveling record=%d)", logfmt.UID8(a.UID), ts.RecordID)
-		return Outcome{UID: a.UID, OK: true, Status: "skipped", Message: fmt.Sprintf("traveling record=%d", ts.RecordID)}
+		log.Printf("travel %s: skip (traveling record=%d reward_pending=%d)", logfmt.UID8(a.UID), ts.RecordID, ts.RewardCredit)
+		return Outcome{
+			UID: a.UID, Nickname: a.Nickname, OK: true, Status: StatusSkipped,
+			Pending: ts.RewardCredit,
+			Message: fmt.Sprintf("在途（record_id=%d）%s", ts.RecordID, pendingText(ts.RewardCredit)),
+		}
 	default:
 		log.Printf("travel %s: skip (unknown state %q)", logfmt.UID8(a.UID), ts.State)
-		return Outcome{UID: a.UID, OK: true, Status: StatusSkipped, Message: "旅行状态未知（" + ts.State + "），本轮未处理"}
+		return Outcome{UID: a.UID, Nickname: a.Nickname, OK: true, Status: StatusSkipped, Message: "旅行状态未知（" + ts.State + "），本轮未处理"}
 	}
 }
 
@@ -165,29 +180,52 @@ func (s *Scheduler) travelOne(a *auth.Auth) Outcome {
 func (s *Scheduler) travelDepart(a *auth.Auth, ts *upstream.TravelState) Outcome {
 	if ts.DailyLimitReached {
 		log.Printf("travel %s: skip (daily limit reached)", logfmt.UID8(a.UID))
-		return Outcome{UID: a.UID, OK: true, Status: StatusSkipped, Message: "今日旅行次数已达上限，未再派出"}
+		return Outcome{
+			UID: a.UID, Nickname: a.Nickname, OK: true, Status: StatusSkipped,
+			Pending: ts.RewardCredit,
+			Message: "今日已派出过（本轮不再派出）" + pendingText(ts.RewardCredit),
+		}
 	}
 	if err := s.cfg.Upstream.TravelDepart(a, travelLocationID); err != nil {
 		log.Printf("travel %s: depart: %v", logfmt.UID8(a.UID), err)
-		return Outcome{UID: a.UID, OK: false, Status: "fail", Message: "depart: " + err.Error()}
+		return Outcome{UID: a.UID, Nickname: a.Nickname, OK: false, Status: "fail", Message: "depart: " + err.Error()}
 	}
-	log.Printf("travel %s: depart ok location=%d", logfmt.UID8(a.UID), travelLocationID)
-	return Outcome{UID: a.UID, OK: true, Status: "ok", Message: fmt.Sprintf("depart location=%d", travelLocationID)}
+	log.Printf("travel %s: depart ok location=%d reward_pending=%d", logfmt.UID8(a.UID), travelLocationID, ts.RewardCredit)
+	return Outcome{
+		UID: a.UID, Nickname: a.Nickname, OK: true, Status: "ok",
+		Pending: ts.RewardCredit,
+		Message: fmt.Sprintf("已派出（地点 %d）%s", travelLocationID, pendingText(ts.RewardCredit)),
+	}
 }
 
 // travelClaim 到站领奖（必须带 record_id）。
+//
+// record_id 缺失判 fail 而非 skipped：这是上游状态自相矛盾（说到站了却不给记录号），
+// 跟"明确跳过"不是一回事，走 skipped 会让它混在一堆正常跳过里，看不出有问题。
 func (s *Scheduler) travelClaim(a *auth.Auth, ts *upstream.TravelState) Outcome {
 	if ts.RecordID == 0 {
-		log.Printf("travel %s: claim skipped (arrived but no record_id)", logfmt.UID8(a.UID))
-		return Outcome{UID: a.UID, OK: false, Status: "skipped", Message: "arrived but no record_id"}
+		log.Printf("travel %s: claim failed (arrived but no record_id)", logfmt.UID8(a.UID))
+		return Outcome{
+			UID: a.UID, Nickname: a.Nickname, OK: false, Status: "fail",
+			Pending: ts.RewardCredit,
+			Message: fmt.Sprintf("已到站但上游未返回 record_id，无法领奖（预期收益 %d 积分）", ts.RewardCredit),
+		}
 	}
 	reward, err := s.cfg.Upstream.TravelClaim(a, ts.RecordID)
 	if err != nil {
 		log.Printf("travel %s: claim record=%d: %v", logfmt.UID8(a.UID), ts.RecordID, err)
-		return Outcome{UID: a.UID, OK: false, Status: "fail", Message: fmt.Sprintf("claim record=%d: %v", ts.RecordID, err)}
+		return Outcome{
+			UID: a.UID, Nickname: a.Nickname, OK: false, Status: "fail",
+			Pending: ts.RewardCredit,
+			Message: fmt.Sprintf("领奖失败（record_id=%d，预期收益 %d）: %v", ts.RecordID, ts.RewardCredit, err),
+		}
 	}
 	log.Printf("travel %s: claim ok record=%d reward=%d", logfmt.UID8(a.UID), ts.RecordID, reward)
-	return Outcome{UID: a.UID, OK: true, Status: "ok", Reward: reward, Message: fmt.Sprintf("claim record=%d", ts.RecordID)}
+	return Outcome{
+		UID: a.UID, Nickname: a.Nickname, OK: true, Status: "ok",
+		Reward:  reward,
+		Message: fmt.Sprintf("已领奖 %d 积分（record_id=%d）", reward, ts.RecordID),
+	}
 }
 
 // travelAdopt 旅行巡检时领养：受 adoptTriedToday 当日防抖约束。
@@ -203,10 +241,10 @@ func (s *Scheduler) travelAdoptForce(a *auth.Auth) Outcome {
 	buddy, err := s.cfg.Upstream.BuddyInfo(a)
 	if err != nil {
 		log.Printf("activity %s: buddy-info: %v", logfmt.UID8(a.UID), err)
-		return Outcome{UID: a.UID, OK: false, Status: "fail", Message: "buddy-info: " + err.Error()}
+		return Outcome{UID: a.UID, Nickname: a.Nickname, OK: false, Status: "fail", Message: "buddy-info: " + err.Error()}
 	}
 	if buddy != nil {
-		return Outcome{UID: a.UID, OK: true, Status: "skipped", Message: "already has buddy"}
+		return Outcome{UID: a.UID, Nickname: a.Nickname, OK: true, Status: "skipped", Message: "已有猫猫，无需领养"}
 	}
 	return s.adoptBuddy(a, true) // force=true 豁免当日防抖
 }
@@ -216,24 +254,33 @@ func (s *Scheduler) travelAdoptForce(a *auth.Auth) Outcome {
 // 记一次当日已试后静默跳过，不再重试。force=true 时豁免当日防抖（活跃上报补满对话量后重试）。
 func (s *Scheduler) adoptBuddy(a *auth.Auth, force bool) Outcome {
 	if !force && s.adoptTriedToday(a.UID) {
-		return Outcome{UID: a.UID, OK: true, Status: "skipped", Message: "adopt already tried today"}
+		return Outcome{
+			UID: a.UID, Nickname: a.Nickname, OK: true, Status: "skipped",
+			Message: "今日已判定领养门槛未达，明天再试",
+		}
 	}
 	if err := s.cfg.Upstream.BuddyAgreement(a); err != nil {
 		log.Printf("travel %s: agreement: %v", logfmt.UID8(a.UID), err)
-		return Outcome{UID: a.UID, OK: false, Status: "fail", Message: "agreement: " + err.Error()}
+		return Outcome{UID: a.UID, Nickname: a.Nickname, OK: false, Status: "fail", Message: "agreement: " + err.Error()}
 	}
 	err := s.cfg.Upstream.BuddyFirst(a)
 	switch {
 	case err == nil:
 		log.Printf("travel %s: adopt ok (+300 credits)", logfmt.UID8(a.UID))
-		return Outcome{UID: a.UID, OK: true, Status: "ok", Reward: 300, Message: "adopt ok"}
+		return Outcome{
+			UID: a.UID, Nickname: a.Nickname, OK: true, Status: "ok",
+			Reward: 300, Message: "领养成功，一次性收益 300 积分",
+		}
 	case upstream.IsBuddyTaskIncomplete(err):
 		s.markAdoptTried(a.UID)
 		log.Printf("travel %s: adopt skipped (conversation threshold not reached, retry tomorrow)", logfmt.UID8(a.UID))
-		return Outcome{UID: a.UID, OK: true, Status: "skipped", Message: "conversation threshold not reached"}
+		return Outcome{
+			UID: a.UID, Nickname: a.Nickname, OK: true, Status: "skipped",
+			Message: "领养门槛未达（对话量不足），明天再试",
+		}
 	default:
 		log.Printf("travel %s: adopt: %v", logfmt.UID8(a.UID), err)
-		return Outcome{UID: a.UID, OK: false, Status: "fail", Message: "adopt: " + err.Error()}
+		return Outcome{UID: a.UID, Nickname: a.Nickname, OK: false, Status: "fail", Message: "adopt: " + err.Error()}
 	}
 }
 

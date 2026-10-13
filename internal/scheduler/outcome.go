@@ -30,8 +30,17 @@ type Outcome struct {
 	OK       bool   `json:"ok"`
 	Status   string `json:"status"` // ok | already | fail | skipped | unreached
 	Message  string `json:"message,omitempty"`
-	Reward   int64  `json:"reward,omitempty"`  // 领奖等一次性收益
+	Reward   int64  `json:"reward,omitempty"`  // 领奖等一次性收益（仅在该动作真的拿到积分时有值）
 	Credits  *int64 `json:"credits,omitempty"` // 签到后余额（查询成功才有值）
+
+	// Pending 到站奖励待次日领取：本轮「在途」或「到站但 record_id 缺失」时置位，
+	// 值 = 上游返回的 `reward_credit`（该趟旅行的预定收益，尚未到账）。
+	//
+	// 为什么必须单独一个字段：Reward 的语义是"已到账"，而旅行一天只有一趟、
+	// 派出后要隔天才能领奖，所以任一轮巡检里最多只有一个账号既有 Reward（刚领到）
+	// —— 面板上看起来就像"只有一个人有收益"。实际上每个账号的收益在**派出时**
+	// 就已确定，放在这里让"这一轮谁有收益、谁没有"变得可读。
+	Pending int64 `json:"reward_pending,omitempty"`
 
 	// Output / ExitCode 仅脚本类任务（school/cat）填充：合并的 stdout+stderr 尾部
 	// 与子进程退出码，供面板展示失败原因（此前输出被丢弃、失败只剩 exit status）。

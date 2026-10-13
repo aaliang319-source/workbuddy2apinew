@@ -25,6 +25,7 @@ type AutomationItem struct {
 	Status   string `json:"status"`
 	Message  string `json:"message,omitempty"`
 	Reward   int64  `json:"reward,omitempty"`
+	Pending  int64  `json:"reward_pending,omitempty"`
 	Credits  *int64 `json:"credits,omitempty"`
 }
 
@@ -40,6 +41,8 @@ type AutomationRun struct {
 	Failed       int              `json:"failed"`
 	Skipped      int              `json:"skipped"`
 	Accounts     int              `json:"accounts,omitempty"`
+	RewardTotal  int64            `json:"reward_total,omitempty"`
+	PendingTotal int64            `json:"reward_pending_total,omitempty"`
 	Reason       string           `json:"reason,omitempty"`
 	ParseWarning string           `json:"parse_warning,omitempty"`
 	Error        string           `json:"error,omitempty"`

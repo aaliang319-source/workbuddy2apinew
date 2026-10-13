@@ -39,6 +39,15 @@ const STATUS_BADGES: Record<string, string> = {
 // 详情统计与过滤的展示顺序：异常在前，一眼看出这次哪里不对。
 const STATUS_ORDER = ['fail', 'unreached', 'skipped', 'already', 'ok']
 
+// 组标题的文字色：失败红、未执行黄、其余弱化——"谁失败"第一眼就能看到。
+const STATUS_TEXT_CLS: Record<string, string> = {
+  fail: 'text-danger',
+  unreached: 'text-warn',
+  ok: 'text-ok',
+  already: 'text-dim',
+  skipped: 'text-dim',
+}
+
 /** 逐账号状态计数（详情顶部一行统计，点一下即过滤）。 */
 function countStatuses(items: AutomationItem[]): { status: string; n: number }[] {
   const m = new Map<string, number>()
@@ -48,6 +57,59 @@ function countStatuses(items: AutomationItem[]): { status: string; n: number }[]
     .filter((s) => !STATUS_ORDER.includes(s))
     .map((s) => ({ status: s, n: m.get(s) ?? 0 }))
   return [...known, ...unknown]
+}
+
+/** rankOf 状态优先级（未知状态排最后）。 */
+function rankOf(status: string): number {
+  const i = STATUS_ORDER.indexOf(status)
+  return i < 0 ? STATUS_ORDER.length : i
+}
+
+/** sortByStatus 按状态优先级稳定排序：异常在前、成功在后。 */
+function sortByStatus(items: AutomationItem[]): AutomationItem[] {
+  return items
+    .map((it, i) => ({ it, i }))
+    .sort((a, b) => rankOf(a.it.status) - rankOf(b.it.status) || a.i - b.i)
+    .map((x) => x.it)
+}
+
+/** detailLabel 条目展示名：优先昵称，其次 uid 前 8 位。 */
+function detailLabel(it: AutomationItem): string {
+  return it.nickname || it.uid?.slice(0, 8) || '（脚本级）'
+}
+
+/** rewardText 单条收益文案：已到账 +N / 到站待领 N / 两者都没有则返回空。 */
+function rewardText(it: AutomationItem): string {
+  const won = it.reward ?? 0
+  const pending = it.reward_pending ?? 0
+  if (won > 0 && pending > 0) return `+${won}（待领 ${pending}）`
+  if (won > 0) return `+${won}`
+  if (pending > 0) return `待领 ${pending}`
+  return ''
+}
+
+/** 详情行：分组标题行 + 条目行（全量视图按状态分组，过滤视图平铺）。 */
+type DetailRow =
+  | { kind: 'group'; status: string; n: number; names: string[] }
+  | { kind: 'item'; item: AutomationItem }
+
+/** buildDetailRows 组装详情渲染行；过滤时平铺，全量时按状态分组。 */
+function buildDetailRows(items: AutomationItem[], statusFilter: string | null): DetailRow[] {
+  const rows: DetailRow[] = []
+  if (statusFilter) {
+    for (const it of items.filter((x) => x.status === statusFilter)) rows.push({ kind: 'item', item: it })
+    return rows
+  }
+  let last = ''
+  for (const it of sortByStatus(items)) {
+    if (it.status !== last) {
+      const group = items.filter((x) => x.status === it.status)
+      rows.push({ kind: 'group', status: it.status, n: group.length, names: group.map(detailLabel) })
+      last = it.status
+    }
+    rows.push({ kind: 'item', item: it })
+  }
+  return rows
 }
 
 const KIND_LABELS: Record<string, string> = {
@@ -93,6 +155,8 @@ export default function Automation({ session }: { session: SessionInfo }) {
   const [detail, setDetail] = useState<AutomationRun | null>(null)
   // 详情里的逐账号过滤（null = 全部）；点开新记录时清空，避免沿用上一条的过滤条件。
   const [statusFilter, setStatusFilter] = useState<string | null>(null)
+  // 列表接口按 summary 返回（不含 items），详情必须按 ID 再拉一次完整记录。
+  const [detailLoading, setDetailLoading] = useState(false)
   const pollRef = useRef<number | null>(null)
 
   const writable = !session.read_only
@@ -197,13 +261,34 @@ export default function Automation({ session }: { session: SessionInfo }) {
     }
   }
 
+  /**
+   * openDetail 打开运行详情。
+   *
+   * 列表接口（/api/automation/runs）走网关的 summary 口径，**刻意剥掉逐账号 items**
+   * （避免列表响应过大）。所以详情必须再按 ID 拉一次完整记录，否则"哪个账号成功、
+   * 哪个失败"永远是空的。先展示列表已有的摘要避免弹窗空白，拉到完整记录后覆盖。
+   */
+  const openDetail = async (r: AutomationRun) => {
+    setStatusFilter(null)
+    setDetail(r)
+    if (r.running) return // 运行中：交给详情轮询拉取
+    setDetailLoading(true)
+    try {
+      const full = await api.automationRun(r.id)
+      setDetail((cur) => (cur && cur.id === full.id ? full : cur))
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : '拉取运行明细失败（列表摘要仍可查看）')
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
   const trigger = async (kind: string) => {
     setTriggering(kind)
     setNotice(null)
     try {
       const res = await api.automationTrigger(kind)
-      setStatusFilter(null)
-      setDetail(res.run)
+      await openDetail(res.run)
       void load(true)
     } catch (err) {
       setError(err instanceof ApiError ? err.message : '触发失败')
@@ -217,7 +302,7 @@ export default function Automation({ session }: { session: SessionInfo }) {
   // 详情页的逐账号视图：状态统计 + 过滤（脚本类任务一次十几条，不筛很难看出"谁没跑"）。
   const detailItems = detail?.items ?? []
   const statusCounts = countStatuses(detailItems)
-  const shownItems = statusFilter ? detailItems.filter((it) => it.status === statusFilter) : detailItems
+  const detailRows = buildDetailRows(detailItems, statusFilter)
 
   return (
     <>
@@ -292,6 +377,7 @@ export default function Automation({ session }: { session: SessionInfo }) {
                   <th>触发</th>
                   <th>开始时间</th>
                   <th className="num">账号</th>
+                  <th className="num">收益</th>
                   <th>成功 / 失败 / 跳过（含原因摘要）</th>
                   <th>耗时</th>
                   <th></th>
@@ -310,6 +396,18 @@ export default function Automation({ session }: { session: SessionInfo }) {
                       {fmtISO(r.started_at)}
                     </td>
                     <td className="num text-dim">{r.accounts ? fmtNum(r.accounts) : '—'}</td>
+                    <td className="num">
+                      {(r.reward_total ?? 0) > 0 ? (
+                        <span className="text-ok">+{fmtNum(r.reward_total ?? 0)}</span>
+                      ) : (
+                        <span className="text-dim">—</span>
+                      )}
+                      {(r.reward_pending_total ?? 0) > 0 && (
+                        <div className="text-dim" style={{ fontSize: 11.5 }}>
+                          待领 {fmtNum(r.reward_pending_total ?? 0)}
+                        </div>
+                      )}
+                    </td>
                     <td>
                       <div>
                         <span className="text-ok">{fmtNum(r.ok)}</span> /{' '}
@@ -338,13 +436,7 @@ export default function Automation({ session }: { session: SessionInfo }) {
                       {durationOf(r)}
                     </td>
                     <td>
-                      <button
-                        className="btn btn-sm"
-                        onClick={() => {
-                          setStatusFilter(null)
-                          setDetail(r)
-                        }}
-                      >
+                      <button className="btn btn-sm" onClick={() => void openDetail(r)}>
                         详情
                       </button>
                     </td>
@@ -370,11 +462,33 @@ export default function Automation({ session }: { session: SessionInfo }) {
             <dd>{detail.running ? '—' : fmtISO(detail.finished_at)}</dd>
             <dt>结果</dt>
             <dd>
-              成功 {detail.ok} · 失败 {detail.failed} · 跳过 {detail.skipped}
-              {detail.accounts ? ` · 账号 ${detail.accounts}` : ''}
+              <span className="text-ok">成功 {fmtNum(detail.ok)}</span> ·{' '}
+              <span className={detail.failed > 0 ? 'text-danger' : 'text-dim'}>失败 {fmtNum(detail.failed)}</span> ·{' '}
+              <span className="text-dim">跳过 {fmtNum(detail.skipped)}</span>
+              {detail.accounts ? ` · 账号 ${fmtNum(detail.accounts)}` : ''}
               {detail.exit_code !== null && detail.exit_code !== undefined ? ` · 退出码 ${detail.exit_code}` : ''}
             </dd>
+            {(detailItems.some((it) => (it.reward ?? 0) > 0) ||
+              detailItems.some((it) => (it.reward_pending ?? 0) > 0)) && (
+              <>
+                <dt>收益</dt>
+                <dd>
+                  {detailItems.reduce((n, it) => n + (it.reward ?? 0), 0) > 0 && (
+                    <span className="text-ok">
+                      已到账 +{fmtNum(detailItems.reduce((n, it) => n + (it.reward ?? 0), 0))}
+                    </span>
+                  )}
+                  {detailItems.reduce((n, it) => n + (it.reward_pending ?? 0), 0) > 0 && (
+                    <span className="text-dim">
+                      {detailItems.reduce((n, it) => n + (it.reward ?? 0), 0) > 0 ? ' · ' : ''}
+                      到站待领 {fmtNum(detailItems.reduce((n, it) => n + (it.reward_pending ?? 0), 0))}
+                    </span>
+                  )}
+                </dd>
+              </>
+            )}
           </div>
+          {detailLoading && <Spinner label="正在拉取逐账号明细…" />}
           {detail.error && <Alert kind="error">{detail.error}</Alert>}
           {detail.parse_warning && (
             <Alert kind="warn">
@@ -397,7 +511,7 @@ export default function Automation({ session }: { session: SessionInfo }) {
                     className={`btn btn-sm ${statusFilter === c.status ? 'btn-primary' : ''}`}
                     onClick={() => setStatusFilter(statusFilter === c.status ? null : c.status)}
                   >
-                    {STATUS_LABELS[c.status] ?? c.status} {c.n}
+                    <span className={STATUS_TEXT_CLS[c.status] ?? ''}>{STATUS_LABELS[c.status] ?? c.status}</span> {c.n}
                   </button>
                 ))}
                 {statusFilter === 'unreached' && (
@@ -414,26 +528,52 @@ export default function Automation({ session }: { session: SessionInfo }) {
                       <th>状态</th>
                       <th>说明</th>
                       <th className="num">收益</th>
-                      <th className="num">余额</th>
-                    </tr>
+                      <th className="num">余额</th>                    </tr>
                   </thead>
                   <tbody>
-                    {shownItems.map((it, i) => (
-                      <tr key={`${it.uid || 'script'}-${i}`}>
-                        <td>{it.nickname || it.uid?.slice(0, 8) || '—'}</td>
-                        <td>
-                          <Badge cls={STATUS_BADGES[it.status] ?? 'badge-dim'}>
-                            {STATUS_LABELS[it.status] ?? it.status}
-                          </Badge>
-                        </td>
-                        <td className="text-dim" style={{ fontSize: 12, maxWidth: 380, wordBreak: 'break-all' }}>
-                          {it.message || '—'}
-                        </td>
-                        <td className="num">{it.reward ? `+${it.reward}` : '—'}</td>
-                        <td className="num">{it.credits ?? '—'}</td>
-                      </tr>
-                    ))}
-                    {shownItems.length === 0 && (
+                    {/* 按状态分组：每组标题直接列出该组账号昵称，"谁成功、谁失败"一眼可见；
+                        点上方统计过滤后只显示该组，组标题不再重复。 */}
+                    {detailRows.map((row, i) =>
+                      row.kind === 'group' ? (
+                        <tr key={`g-${row.status}`}>
+                          <td
+                            colSpan={5}
+                            style={{
+                              fontSize: 12,
+                              paddingTop: 12,
+                              paddingBottom: 4,
+                              borderBottom: '1px solid var(--border-soft)',
+                            }}
+                          >
+                            <span className={STATUS_TEXT_CLS[row.status] ?? ''} style={{ fontWeight: 550 }}>
+                              {STATUS_LABELS[row.status] ?? row.status} · {row.n} 个
+                            </span>
+                            <span className="text-dim"> （{row.names.join('、')}）</span>
+                          </td>
+                        </tr>
+                      ) : (
+                        <tr key={`${row.item.uid || 'script'}-${i}`}>
+                          <td title={row.item.uid || ''}>{detailLabel(row.item)}</td>
+                          <td>
+                            <Badge cls={STATUS_BADGES[row.item.status] ?? 'badge-dim'}>
+                              {STATUS_LABELS[row.item.status] ?? row.item.status}
+                            </Badge>
+                          </td>
+                          <td className="text-dim" style={{ fontSize: 12, maxWidth: 380, wordBreak: 'break-all' }}>
+                            {row.item.message || '—'}
+                          </td>
+                          <td className="num">
+                            {(() => {
+                              const txt = rewardText(row.item)
+                              if (!txt) return '—'
+                              return <span className={(row.item.reward ?? 0) > 0 ? 'text-ok' : 'text-dim'}>{txt}</span>
+                            })()}
+                          </td>
+                          <td className="num">{row.item.credits ?? '—'}</td>
+                        </tr>
+                      ),
+                    )}
+                    {detailRows.length === 0 && (
                       <tr>
                         <td colSpan={5} className="text-dim">
                           该状态下没有条目
@@ -447,6 +587,13 @@ export default function Automation({ session }: { session: SessionInfo }) {
                 )}
               </div>
             </>
+          )}
+          {!detail.running && !detailLoading && detailItems.length === 0 && (
+            <Alert kind="warn">
+              该记录没有逐账号明细{detail.accounts ? `（共 ${fmtNum(detail.accounts)} 个账号）` : ''}
+              ——多为逐账号明细功能上线前的旧记录，或脚本未产出可解析的输出。
+              上方「成功 / 失败 / 跳过」是当时的粗粒度口径，无法还原到具体账号。
+            </Alert>
           )}
           {(detail.reason || detail.parse_warning) && (
             <p className="desc" style={{ marginTop: 10 }}>

@@ -6,7 +6,7 @@ import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api'
 import type { Account, RequestRecord, SessionInfo, StatsResponse } from '../types'
 import { Alert, Empty, Spinner, displayName } from '../ui'
-import { fmtClock, fmtCredit, fmtFull, fmtMs, fmtTok, statusTone } from '../format'
+import { fmtCredit, fmtFull, fmtMs, fmtStamp, fmtTok, statusTone } from '../format'
 import { ArrowLeft, ArrowRight, RefreshCw } from 'lucide-react'
 
 export default function Requests({ session: _session }: { session: SessionInfo }) {
@@ -19,6 +19,7 @@ export default function Requests({ session: _session }: { session: SessionInfo }
   // 视图过滤（纯前端，作用于已拉取的 ≤200 条）。
   const [onlyFailed, setOnlyFailed] = useState(false)
   const [modelFilter, setModelFilter] = useState('')
+  const [keyFilter, setKeyFilter] = useState('')
   const [typeFilter, setTypeFilter] = useState<'all' | 'stream' | 'sync'>('all')
   // 排序（默认网关原生新→旧）+ 分页 + 行展开。
   const [sortKey, setSortKey] = useState<'time' | 'wall' | 'ttfb' | 'credit'>('time')
@@ -80,11 +81,18 @@ export default function Requests({ session: _session }: { session: SessionInfo }
     [recent],
   )
 
+  // 出现过的 Key 名（多 Key 模式下排查"哪个 Key 的流量"用）。
+  const keyNames = useMemo(
+    () => [...new Set(recent.map((r) => r.key_name).filter(Boolean))].sort() as string[],
+    [recent],
+  )
+
   const rows = useMemo(() => {
     let list = recent.filter((r) => {
       if (onlyFailed && r.status >= 200 && r.status < 300) return false
       if (typeFilter !== 'all' && (typeFilter === 'stream' ? !r.stream : r.stream)) return false
       if (modelFilter && r.model !== modelFilter) return false
+      if (keyFilter && (r.key_name ?? '') !== keyFilter) return false
       return true
     })
     // 非时间排序：按所选维度降序（排查"最慢的请求""扣费最高"用）。
@@ -93,7 +101,7 @@ export default function Requests({ session: _session }: { session: SessionInfo }
       list = [...list].sort((a, b) => (b[key] ?? 0) - (a[key] ?? 0))
     }
     return list
-  }, [recent, onlyFailed, typeFilter, modelFilter, sortKey])
+  }, [recent, onlyFailed, typeFilter, modelFilter, keyFilter, sortKey])
 
   // 筛选后小计：看"这波失败亏了多少 / 整体慢不慢"，不必心算。
   const summary = useMemo(() => {
@@ -114,7 +122,14 @@ export default function Requests({ session: _session }: { session: SessionInfo }
     localStorage.setItem('requests.pageSize', String(n))
     resetPage()
   }
-  const hasFilter = onlyFailed || typeFilter !== 'all' || modelFilter !== ''
+  const hasFilter = onlyFailed || typeFilter !== 'all' || modelFilter !== '' || keyFilter !== ''
+  // Key 名稳定配色：同一 Key 恒同色（哈希取模），多 Key 混排时一眼能分出流量归属。
+  const keyTone = (name: string) => {
+    const palette = ['text-ok', 'text-warn', 'text-danger', 'text-accent', 'text-dim']
+    let h = 0
+    for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0
+    return palette[h % palette.length]
+  }
   // 行展开标识：time+model+status+uid 组合在 200 条内唯一。
   const toggleExpand = (r: RequestRecord) => {
     const k = `${r.time}|${r.model}|${r.status}|${r.uid ?? ''}`
@@ -197,6 +212,17 @@ export default function Requests({ session: _session }: { session: SessionInfo }
             </select>
           </label>
           <label className="text-dim" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
+            Key
+            <select className="mono" value={keyFilter} onChange={(e) => { setKeyFilter(e.target.value); resetPage() }} style={{ maxWidth: 160 }}>
+              <option value="">全部</option>
+              {keyNames.map((k) => (
+                <option key={k} value={k}>
+                  {k}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-dim" style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
             排序
             <select value={sortKey} onChange={(e) => { setSortKey(e.target.value as typeof sortKey); resetPage() }}>
               <option value="time">最新优先</option>
@@ -221,6 +247,7 @@ export default function Requests({ session: _session }: { session: SessionInfo }
                 setOnlyFailed(false)
                 setTypeFilter('all')
                 setModelFilter('')
+                setKeyFilter('')
                 resetPage()
               }}
             >
@@ -281,7 +308,7 @@ export default function Requests({ session: _session }: { session: SessionInfo }
                         style={{ cursor: 'pointer' }}
                         title="点击展开/收起详情"
                       >
-                        <td className="mono text-faint" title={fmtFull(r.time)}>{fmtClock(r.time)}</td>
+                        <td className="mono text-faint" title={fmtFull(r.time)}>{fmtStamp(r.time)}</td>
                         <td className="mono">
                       {r.req_model && r.req_model !== r.model && (
                         <span className="text-dim" style={{ fontSize: 11 }}>{r.req_model} → </span>
@@ -319,7 +346,9 @@ export default function Requests({ session: _session }: { session: SessionInfo }
                             )
                           })()}
                         </td>
-                        <td className="text-dim" style={{ fontSize: 12 }}>{r.key_name || '—'}</td>
+                        <td className={`mono ${r.key_name ? keyTone(r.key_name) : 'text-dim'}`} style={{ fontSize: 12 }} title={r.key_name ? `业务 Key：${r.key_name}` : undefined}>
+                          {r.key_name || '—'}
+                        </td>
                         <td className="text-faint">{r.proto || '—'}</td>
                         <td className="text-faint">{r.stream ? '流式' : '同步'}</td>
                         <td className="num">
@@ -359,7 +388,7 @@ export default function Requests({ session: _session }: { session: SessionInfo }
                                 )}
                               </dd>
                               <dt>Key</dt>
-                              <dd className="mono">{r.key_name || '—'}</dd>
+                              <dd className="mono">{r.key_name || '—'}{r.key_name && <span className="text-faint" style={{ marginLeft: 8, fontSize: 11 }}>（业务 Key：客户端用它鉴权，决定可用的账号与模型范围）</span>}</dd>
                               <dt>尝试</dt>
                               <dd>
                                 {r.tries ?? 1}
@@ -421,7 +450,12 @@ export default function Requests({ session: _session }: { session: SessionInfo }
           <dt>账号</dt>
           <dd>本条请求实际使用的账号 UID（网关按 Key 关联 + 优先级分层调度选出）。</dd>
           <dt>Key</dt>
-          <dd>该请求命中的业务 API Key 名——排查"为什么走了某个账号"时先看这一列（不同 Key 的关联与优先级不同）。</dd>
+          <dd>
+            该请求命中的业务 API Key 名——排查"为什么走了某个账号"时先看这一列（不同 Key 的关联与优先级不同）。
+            同名 Key 恒用同一种颜色，多 Key 混排时可一眼分出流量归属；顶部「Key」下拉可按 Key 过滤。
+          </dd>
+          <dt>时间</dt>
+          <dd>格式为 <span className="mono">MM-DD HH:MM:SS</span>（本地时区）。明细常跨天，带日期才能分清记录属于哪一天；悬浮可见完整年份。</dd>
           <dt>尝试</dt>
           <dd>轮转尝试次数：1 = 一次选中即成功；大于 1 表示中途换过号（限流/失效/余额不足），换号原因见「错误」列。</dd>
           <dt>思考等级</dt>

@@ -25,6 +25,16 @@ export function fmtClock(iso: string): string {
   return isNaN(d.getTime()) ? iso : d.toLocaleTimeString('zh-CN', { hour12: false })
 }
 
+/** 明细时间列（带日期）：RFC3339 → "MM-DD HH:MM:SS"。
+ * 环形缓冲保留最近 200 条、常跨天，只显 HH:MM:SS 分不清记录属于哪天；
+ * 年份省略（200 条覆盖不了这么久），完整时刻仍在 title/展开里。 */
+export function fmtStamp(iso: string): string {
+  const d = new Date(iso)
+  if (isNaN(d.getTime())) return iso
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
 /** 完整本地时间：RFC3339 → "YYYY-MM-DD HH:MM:SS"（行展开/悬浮用，消除跨天歧义）。 */
 export function fmtFull(iso: string): string {
   const d = new Date(iso)

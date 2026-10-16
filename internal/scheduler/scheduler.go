@@ -164,14 +164,29 @@ const (
 )
 
 // nextFire 返回 now 之后最近的一次触发时刻；hours 为本地小时（0-23）。
-//
-// hours 是**窗口**而非精确时刻：每个小时点内随机取一刻（见 Randomizer.jitteredAt），
-// 整点本身永不被选中。每个小时点各掷一次——窗口当天可能已过，改掷次日；
-// 掷出的落点若已过（同一小时内重算时可能发生）就再掷一次，最多 3 次后兜底用窗口起点，
-// 保证返回值恒为有效时刻（调用方不能拿到零时间）。
+// 无 kind（不感知已执行槽位）的一次性计算路径，测试与旧调用方使用。
 func (r *Randomizer) nextFire(now time.Time, hours []int) time.Time {
+	return r.nextFireKind("", now, hours)
+}
+
+// nextFireKind 同 nextFire，但感知「该任务类型已真实执行过的小时槽」：
+// kind 非空且该槽已执行（MarkFired 记下）时，当天该槽作废、直接掷次日。
+//
+// 为什么必须去重：小时是**窗口**（hour:00:01 ~ hour:55 随机落点），执行后循环
+// 重排时窗口内剩余时间仍在"将来"，nextFire 会重掷出同槽的另一个落点——同一
+// 小时窗口被重复执行 2~3 次（跨度 55 分钟时），历史里表现为"同一时间点三条
+// 相同记录"。执行后记下槽位，同槽跳过，下一个取值自然落次日同一小时。
+func (r *Randomizer) nextFireKind(kind string, now time.Time, hours []int) time.Time {
 	var earliest time.Time
 	for _, h := range hours {
+		// 已执行的小时槽：当天作废，直接掷次日（次日必在将来）。
+		if kind != "" && r.firedSlot(kind, now, h) {
+			t := r.jitteredAt(now.AddDate(0, 0, 1), h)
+			if earliest.IsZero() || t.Before(earliest) {
+				earliest = t
+			}
+			continue
+		}
 		// 先连掷 3 次找一个"今天仍在将来"的落点。
 		t := time.Time{}
 		for i := 0; i < 3; i++ {

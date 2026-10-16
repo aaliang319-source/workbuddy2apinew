@@ -32,6 +32,11 @@ type Randomizer struct {
 	rnd  *rand.Rand
 	span time.Duration
 	last map[string]time.Time
+
+	// fired kind → 已真实执行过的小时槽（截断到整点）。执行后重排时同槽作废、
+	// 直接掷次日：否则小时窗口内的剩余时间仍在"将来"，nextFire 会重掷出同槽
+	// 的另一个落点，导致同一小时窗口重复执行 2~3 次（抖动跨度 55 分钟时尤甚）。
+	fired map[string]time.Time
 }
 
 // NewRandomizer 构建抖动源；spanMinutes 是抖动跨度（分钟），**0 = 准点执行**。
@@ -45,6 +50,7 @@ func NewRandomizer(spanMinutes int) *Randomizer {
 		rnd:  rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64())),
 		span: clampSpanMinutes(spanMinutes),
 		last: map[string]time.Time{},
+		fired: map[string]time.Time{},
 	}
 }
 
@@ -57,6 +63,7 @@ func (r *Randomizer) ResetForSpec(spec ScheduleSpec) {
 	r.mu.Lock()
 	r.span = time.Duration(spec.JitterSpan()) * time.Minute
 	r.last = map[string]time.Time{}
+	r.fired = map[string]time.Time{}
 	r.mu.Unlock()
 }
 
@@ -80,6 +87,7 @@ func (r *Randomizer) setSpanFromSpec(spec ScheduleSpec) {
 	if r.span != want {
 		r.span = want
 		r.last = map[string]time.Time{}
+		r.fired = map[string]time.Time{}
 	}
 	r.mu.Unlock()
 }
@@ -159,6 +167,38 @@ func (r *Randomizer) remember(kind string, at time.Time) {
 		return
 	}
 	r.last[kind] = at
+}
+
+// MarkFired 记下某任务类型真实执行完成的小时槽（取执行时刻所在整点）。
+// 之后 nextFireKind 对同槽不再参与排定（去重：一个窗口只执行一次）。
+// 零值 Randomizer（fired 为 nil）直接跳过——与 remember 同口径。
+func (r *Randomizer) MarkFired(kind string, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.fired == nil {
+		return
+	}
+	r.fired[kind] = time.Date(at.Year(), at.Month(), at.Day(), at.Hour(), 0, 0, 0, at.Location())
+}
+
+// firedSlot 判定 kind 在 now 所处时刻之前、是否已执行过 hour 这个小时槽。
+// 只比对"执行日 == 今日且槽 hour 与执行槽相同"，跨日的旧记录自然失效
+// （每日循环重新起算）。调用方需持有 r.mu 不必要——本函数自取锁。
+func (r *Randomizer) firedSlot(kind string, now time.Time, hour int) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	at, ok := r.fired[kind]
+	if !ok {
+		return false
+	}
+	return at.Hour() == hour && sameLocalDay(at, now)
+}
+
+// sameLocalDay 判定两个时刻是否同一本地自然日。
+func sameLocalDay(a, b time.Time) bool {
+	ay, am, ad := a.Date()
+	by, bm, bd := b.Date()
+	return ay == by && am == bm && ad == bd
 }
 
 // Scheduled 返回某任务最近排定的触发时刻。

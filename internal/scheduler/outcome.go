@@ -169,22 +169,22 @@ func NextWake(now time.Time, spec ScheduleSpec, r *Randomizer) (time.Time, []Kin
 	}
 	var slots []slot
 	if !spec.CheckinDisabled {
-		slots = append(slots, slot{r.nextFire(now, spec.CheckinHours), KindCheckin})
+		slots = append(slots, slot{r.nextFireKind(string(KindCheckin), now, spec.CheckinHours), KindCheckin})
 	}
 	if !spec.TravelDisabled {
-		slots = append(slots, slot{r.nextFire(now, spec.TravelHours), KindTravel})
+		slots = append(slots, slot{r.nextFireKind(string(KindTravel), now, spec.TravelHours), KindTravel})
 	}
 	if !spec.ActivityDisabled {
-		slots = append(slots, slot{r.nextFire(now, spec.ActivityHours), KindActivity})
+		slots = append(slots, slot{r.nextFireKind(string(KindActivity), now, spec.ActivityHours), KindActivity})
 	}
 	if !spec.KeepaliveDisabled {
-		slots = append(slots, slot{r.nextFire(now, spec.KeepaliveHours), KindKeepalive})
+		slots = append(slots, slot{r.nextFireKind(string(KindKeepalive), now, spec.KeepaliveHours), KindKeepalive})
 	}
 	if !spec.SchoolDisabled {
-		slots = append(slots, slot{r.nextFire(now, spec.SchoolHours), KindSchool})
+		slots = append(slots, slot{r.nextFireKind(string(KindSchool), now, spec.SchoolHours), KindSchool})
 	}
 	if !spec.CatDisabled {
-		slots = append(slots, slot{r.nextFire(now, spec.CatHours), KindCat})
+		slots = append(slots, slot{r.nextFireKind(string(KindCat), now, spec.CatHours), KindCat})
 	}
 	var earliest time.Time
 	for _, sl := range slots {

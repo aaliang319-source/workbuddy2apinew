@@ -305,7 +305,17 @@ func (m *Manager) finish(run Run, kind scheduler.Kind, outs []scheduler.Outcome)
 	}
 	run.Running = false
 	run.FinishedAt = m.now()
+	// 记下本槽已真实执行：执行后循环重排时同槽作废（nextFireKind 跳过 → 直接掷次日），
+	// 否则抖动窗口内剩余时间仍在"将来"，同一小时窗口会被重复执行 2~3 次。
+	// 槽位按 StartedAt 取（那次触发所属的小时），手动触发与定时执行同口径。
+	m.rnd.MarkFired(string(kind), run.StartedAt)
 	m.store.Upsert(run)
+	// 唤醒循环重算下次触发：手动触发后旧定时器可能还指着本槽的旧落点，
+	// 不唤醒的话到点仍会再跑一次。非阻塞（循环可能正忙于执行）。
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
 
 	m.mu.Lock()
 	delete(m.running, kind)
